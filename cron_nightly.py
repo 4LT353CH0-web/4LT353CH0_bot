@@ -7,6 +7,8 @@ Collecte les signaux du jour → Gemini → Telegram
 import os
 import asyncio
 import subprocess
+import urllib.request
+import json
 from pathlib import Path
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -16,10 +18,14 @@ import telegram
 
 load_dotenv()
 
-VAULT       = Path(os.getenv("VAULT_PATH", os.path.expanduser("~/claude-connaissance")))
-GEMINI_KEY  = os.getenv("GEMINI_API_KEY")
-TOKEN       = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID     = os.getenv("TELEGRAM_CHAT_ID", "")
+VAULT            = Path(os.getenv("VAULT_PATH", os.path.expanduser("~/claude-connaissance")))
+GEMINI_KEY       = os.getenv("GEMINI_API_KEY")
+TOKEN            = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID          = os.getenv("TELEGRAM_CHAT_ID", "")
+DISCORD_WEBHOOK  = os.getenv("DISCORD_WEBHOOK",
+    "https://discord.com/api/webhooks/1497502798986870825/"
+    "OJFKCTkHD8-JGuaPrA7dDaeJVWAAF_7LikenyB3qL1HtU1MQlDdByTpKXs9yTxvGBUPG"
+)
 
 GEMINI_MODEL = "gemini-2.5-flash"
 
@@ -110,7 +116,21 @@ async def send_digest():
     # 1. Envoyer sur Telegram
     bot = telegram.Bot(token=TOKEN)
     await bot.send_message(chat_id=int(CHAT_ID), text=message)
-    print(f"[{datetime.now():%Y-%m-%d %H:%M}] ✓ Digest envoyé → {CHAT_ID}")
+    print(f"[{datetime.now():%Y-%m-%d %H:%M}] ✓ Telegram → {CHAT_ID}")
+
+    # 2. Envoyer sur Discord #n8n-news
+    try:
+        payload = json.dumps({"content": message}).encode()
+        req = urllib.request.Request(
+            DISCORD_WEBHOOK,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            print(f"[{datetime.now():%Y-%m-%d %H:%M}] ✓ Discord → HTTP {resp.status}")
+    except Exception as e:
+        print(f"[{datetime.now():%Y-%m-%d %H:%M}] ⚠ Discord échoué : {e}")
 
     # 2. Sauvegarder dans _inbox/ pour digestion Claude Code
     ts       = datetime.now().strftime("%Y-%m-%d-%H-%M")
