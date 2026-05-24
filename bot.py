@@ -14,7 +14,8 @@ from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes
 )
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 load_dotenv()
 
@@ -24,8 +25,8 @@ GEMINI_KEY      = os.getenv("GEMINI_API_KEY")
 VAULT           = Path(os.getenv("VAULT_PATH", os.path.expanduser("~/claude-connaissance")))
 WHITELIST       = {int(x) for x in os.getenv("WHITELIST_IDS", "").split(",") if x.strip()}
 
-genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash")
+gemini = genai.Client(api_key=GEMINI_KEY)
+GEMINI_MODEL = "gemini-2.5-flash"
 
 # ── Sessions en mémoire : {user_id: {client, history}} ───────────────────────
 sessions: dict = {}
@@ -144,10 +145,11 @@ async def cmd_gold(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     texte = " ".join(ctx.args)
     await update.message.reply_text("⚗️ Distillation...")
-    r = model.generate_content(
-        f"Extrais les idées actionnables de ce texte. "
-        f"Format : liste courte, chaque item = une action concrète ou décision à prendre. "
-        f"Sois direct, sans intro.\n\n{texte}"
+    r = gemini.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=f"Extrais les idées actionnables de ce texte. "
+                 f"Format : liste courte, chaque item = une action concrète ou décision à prendre. "
+                 f"Sois direct, sans intro.\n\n{texte}"
     )
     await update.message.reply_text(r.text)
 
@@ -172,39 +174,75 @@ async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     session(update.effective_user.id)["history"] = []
     await update.message.reply_text("🔄 Historique vidé.")
 
+MEMO_TRIGGERS = [
+    "note ça", "note ca", "ajoute", "sauvegarde", "retiens",
+    "mets dans inbox", "rappel", "mémorise", "memorise",
+    "add to inbox", "save this", "remember this"
+]
+
+def detect_memo_intent(text: str) -> bool:
+    t = text.lower()
+    return any(trigger in t for trigger in MEMO_TRIGGERS)
+
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(update.effective_user.id):
         return
     s = session(update.effective_user.id)
+    user_text = update.message.text
     vault_ctx = load_context(s["client"])
+
+    # Détection intention memo en langage naturel
+    if detect_memo_intent(user_text):
+        r = gemini.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=f"Extrait uniquement l'information à mémoriser de ce message, "
+                     f"en une phrase concise. Pas d'intro, juste l'info.\n\n{user_text}"
+        )
+        info = r.text.strip()
+        pushed = append_memory(s["client"], info)
+        suffix = " + pushé GitHub ✓" if pushed else " (push échoué)"
+        await update.message.reply_text(
+            f"📌 Mémorisé dans `{s['client']}`{suffix} :\n_{info}_",
+            parse_mode="Markdown"
+        )
+        return
 
     system = (
         "Tu es l'assistant de Jarlounet, Brand Designer. "
         "Ton direct, chaleureux, concis. Pas de flatterie. "
-        "Réponds en français sauf demande contraire.\n\n"
+        "Réponds en français sauf demande contraire. "
+        "Si l'utilisateur te demande de sauvegarder ou noter quelque chose, "
+        "dis-lui d'utiliser la commande /memo [info].\n\n"
         + (f"Contexte chargé :\n{vault_ctx}" if vault_ctx else "")
     )
 
-    s["history"].append({"role": "user", "parts": [update.message.text]})
+    s["history"].append({"role": "user", "parts": [user_text]})
     history = s["history"][-20:]
 
     await update.message.chat.send_action("typing")
 
-    # Injecter le système comme premier échange de l'historique
-    bootstrapped = [
-        {"role": "user",  "parts": [system]},
-        {"role": "model", "parts": ["Compris, je suis prêt."]},
-    ] + history[:-1]
+    # Construire l'historique pour l'API
+    contents = [
+        types.Content(role="user",  parts=[types.Part(text=system)]),
+        types.Content(role="model", parts=[types.Part(text="Compris, je suis prêt.")]),
+    ]
+    for h in history[:-1]:
+        contents.append(types.Content(
+            role=h["role"],
+            parts=[types.Part(text=h["parts"][0])]
+        ))
+    contents.append(types.Content(role="user", parts=[types.Part(text=user_text)]))
 
-    chat = model.start_chat(history=bootstrapped)
-    r = chat.send_message(
-        update.message.text,
-        generation_config={"max_output_tokens": 1500}
+    r = gemini.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=contents,
+        config=types.GenerateContentConfig(max_output_tokens=1500)
     )
 
     reply = r.text
     s["history"].append({"role": "model", "parts": [reply]})
     await update.message.reply_text(reply)
+
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
