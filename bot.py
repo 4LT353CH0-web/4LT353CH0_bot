@@ -100,6 +100,31 @@ def search_vault(query: str, max_results: int = 4) -> str:
         results.append(f"### {rel}\n{excerpt}")
     return "\n\n---\n\n".join(results)
 
+def load_topics() -> dict[str, str]:
+    """Charge les topics depuis clients/_global/topics.md → {mot-clé: dossier}."""
+    topics = {}
+    f = VAULT / "clients" / "_global" / "topics.md"
+    if not f.exists():
+        return topics
+    for line in f.read_text().splitlines():
+        if "→" in line and not line.startswith("#"):
+            parts = line.split("→", 1)
+            if len(parts) == 2:
+                keyword = strip_accents(parts[0].strip().lower())
+                folder = parts[1].strip()
+                topics[keyword] = folder
+    return topics
+
+def detect_topics(text: str) -> list[str]:
+    """Retourne les dossiers vault pertinents selon les topics détectés."""
+    t = strip_accents(text.lower())
+    topics = load_topics()
+    found = []
+    for keyword in sorted(topics.keys(), key=len, reverse=True):
+        if keyword in t and topics[keyword] not in found:
+            found.append(topics[keyword])
+    return found[:2]  # max 2 domaines à la fois
+
 def load_aliases() -> dict[str, str]:
     """Charge les aliases depuis clients/_global/aliases.md."""
     aliases = {}
@@ -329,6 +354,15 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     vault_search = search_vault(user_text)
 
+    # Charger les fichiers des dossiers topic détectés
+    topic_ctx = []
+    for folder in detect_topics(user_text):
+        topic_dir = VAULT / folder
+        if topic_dir.exists():
+            for md in sorted(topic_dir.glob("*.md"))[:2]:
+                topic_ctx.append(f"### {folder}/{md.name}\n{md.read_text()[:1500]}")
+    topic_content = "\n\n---\n\n".join(topic_ctx)
+
     system = (
         "Tu es l'assistant de Jarlounet, Brand Designer. "
         "Ton direct, chaleureux, concis. Pas de flatterie. "
@@ -336,6 +370,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Si l'utilisateur te demande de sauvegarder ou noter quelque chose, "
         "dis-lui d'utiliser la commande /memo [info].\n\n"
         + (f"## Contexte client\n{vault_ctx}\n\n" if vault_ctx else "")
+        + (f"## Ressources domaine\n{topic_content}\n\n" if topic_content else "")
         + (f"## Ressources pertinentes du vault\n{vault_search}" if vault_search else "")
     )
 
