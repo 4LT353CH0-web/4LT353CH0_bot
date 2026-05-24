@@ -1,0 +1,10 @@
+[Unit]
+Description=Déclenche le digest Hermes chaque soir à 22h
+Requires=hermes-nightly.service
+
+[Timer]
+OnCalendar=*-*-* 22:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

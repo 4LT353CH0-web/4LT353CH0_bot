@@ -289,6 +289,10 @@ async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     session(update.effective_user.id)["history"] = []
     await update.message.reply_text("🔄 Historique vidé.")
 
+async def cmd_myid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    await update.message.reply_text(f"Ton Telegram ID : `{uid}`", parse_mode="Markdown")
+
 SAVE_TRIGGERS = [
     "sauvegarde cette réponse", "sauvegarde la réponse", "garde ça dans inbox",
     "mets ça dans inbox", "enregistre cette réponse", "ajoute à inbox",
@@ -455,6 +459,7 @@ def main():
     app.add_handler(CommandHandler("gold",    cmd_gold))
     app.add_handler(CommandHandler("status",  cmd_status))
     app.add_handler(CommandHandler("reset",   cmd_reset))
+    app.add_handler(CommandHandler("myid",    cmd_myid))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print(f"🚀 Projet Hermes démarré — vault : {VAULT}")

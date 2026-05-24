@@ -1,0 +1,10 @@
+[Unit]
+Description=Hermes digest nightly — one-shot
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/kingofthedesert/4LT353CH0_bot
+ExecStart=/usr/bin/python3 /home/kingofthedesert/4LT353CH0_bot/cron_nightly.py
+Environment=PYTHONPATH=/home/kingofthedesert/.local/lib/python3.12/site-packages
+StandardOutput=append:/home/kingofthedesert/4LT353CH0_bot/logs/nightly.log
+StandardError=append:/home/kingofthedesert/4LT353CH0_bot/logs/nightly.log
