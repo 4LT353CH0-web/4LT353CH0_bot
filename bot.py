@@ -184,11 +184,26 @@ def detect_memo_intent(text: str) -> bool:
     t = text.lower()
     return any(trigger in t for trigger in MEMO_TRIGGERS)
 
+def detect_client(text: str) -> str | None:
+    """Détecte un nom de client dans le message. Retourne le nom ou None."""
+    t = text.lower()
+    for client in list_clients():
+        if client != "_global" and client in t:
+            return client
+    return None
+
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(update.effective_user.id):
         return
     s = session(update.effective_user.id)
     user_text = update.message.text
+
+    # Détection automatique du client dans le message
+    detected = detect_client(user_text)
+    if detected and detected != s["client"]:
+        s["client"] = detected
+        s["history"] = []  # nouveau contexte = reset historique
+
     vault_ctx = load_context(s["client"])
 
     # Détection intention memo en langage naturel
