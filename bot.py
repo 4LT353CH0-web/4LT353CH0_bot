@@ -7,6 +7,7 @@ Multi-client, validation humaine, pas d'auto-modification
 import os
 import asyncio
 import subprocess
+import unicodedata
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
@@ -193,11 +194,14 @@ def detect_memo_intent(text: str) -> bool:
     t = text.lower()
     return any(trigger in t for trigger in MEMO_TRIGGERS)
 
+def strip_accents(s: str) -> str:
+    return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+
 def detect_client(text: str) -> str | None:
     """Détecte un nom de client dans le message. Retourne le nom ou None."""
-    t = text.lower()
+    t = strip_accents(text.lower())
     for client in list_clients():
-        if client != "_global" and client in t:
+        if client != "_global" and strip_accents(client) in t:
             return client
     return None
 
