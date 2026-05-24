@@ -26,6 +26,32 @@ GEMINI_KEY      = os.getenv("GEMINI_API_KEY")
 VAULT           = Path(os.getenv("VAULT_PATH", os.path.expanduser("~/claude-connaissance")))
 WHITELIST       = {int(x) for x in os.getenv("WHITELIST_IDS", "").split(",") if x.strip()}
 
+# ── Multi-vault ───────────────────────────────────────────────────────────────
+VAULTS = {
+    "connaissance": VAULT,
+    "musique":      Path(os.path.expanduser("~/claude-musique")),
+    "creative":     Path(os.path.expanduser("~/claude-creative-coding")),
+    "opendesign":   Path(os.path.expanduser("~/claude-opendesign")),
+}
+
+VAULT_TRIGGERS: dict[str, list[str]] = {
+    "musique":   ["musique", "instrument", "composition", "accord", "melodie",
+                  "chanson", "harmonie", "partition", "theorie musicale"],
+    "creative":  ["creative coding", "processing", "sketch", "generatif",
+                  "p5js", "p5", "openframeworks", "glsl", "shader", "visuel"],
+    "opendesign":["opendesign", "open design", "figma open"],
+}
+
+def detect_vault(text: str) -> Path:
+    """Retourne le vault le plus pertinent selon le message."""
+    t = strip_accents(text.lower())
+    for vault_name, triggers in VAULT_TRIGGERS.items():
+        if any(trigger in t for trigger in sorted(triggers, key=len, reverse=True)):
+            v = VAULTS[vault_name]
+            if v.exists():
+                return v
+    return VAULT  # défaut : connaissance
+
 gemini = genai.Client(api_key=GEMINI_KEY)
 GEMINI_MODEL = "gemini-2.5-flash"
 
@@ -68,8 +94,10 @@ def load_context(client_name: str) -> str:
 
     return "\n\n---\n\n".join(parts) if parts else ""
 
-def search_vault(query: str, max_results: int = 4) -> str:
+def search_vault(query: str, max_results: int = 4, vault: Path = None) -> str:
     """RAG basique : cherche les fichiers les plus pertinents par mots-clés."""
+    if vault is None:
+        vault = VAULT
     EXCLUDE = {"_inbox", "dialogue-archive", "done", "assets"}
     stopwords = {"pour", "dans", "avec", "quoi", "comment", "est", "que", "les", "des", "une", "qui"}
     words = [strip_accents(w) for w in query.lower().split()
@@ -78,7 +106,7 @@ def search_vault(query: str, max_results: int = 4) -> str:
         return ""
 
     scores: dict = {}
-    for md in VAULT.rglob("*.md"):
+    for md in vault.rglob("*.md"):
         if any(p in md.parts for p in EXCLUDE):
             continue
         try:
@@ -96,7 +124,7 @@ def search_vault(query: str, max_results: int = 4) -> str:
     results = []
     for f, _ in top:
         excerpt = f.read_text()[:1500]
-        rel = str(f.relative_to(VAULT))
+        rel = str(f.relative_to(vault))
         results.append(f"### {rel}\n{excerpt}")
     return "\n\n---\n\n".join(results)
 
@@ -352,7 +380,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    vault_search = search_vault(user_text)
+    active_vault = detect_vault(user_text)
+    vault_search = search_vault(user_text, vault=active_vault)
 
     # Charger les fichiers des dossiers topic détectés
     topic_ctx = []
