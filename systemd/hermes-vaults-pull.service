@@ -1,0 +1,6 @@
+[Unit]
+Description=Hermes — git pull tous les vaults
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'for d in /home/kingofthedesert/claude-connaissance /home/kingofthedesert/claude-musique /home/kingofthedesert/claude-creative-coding /home/kingofthedesert/claude-opendesign; do [ -d "$d" ] && git -C "$d" pull --ff-only origin main 2>&1 || true; done'

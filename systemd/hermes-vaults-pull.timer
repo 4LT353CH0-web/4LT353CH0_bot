@@ -1,0 +1,10 @@
+[Unit]
+Description=Sync vaults Hermes toutes les 6h
+Requires=hermes-vaults-pull.service
+
+[Timer]
+OnCalendar=*-*-* 06,12,18,00:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

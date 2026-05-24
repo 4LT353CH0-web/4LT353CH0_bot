@@ -305,6 +305,61 @@ async def cmd_myid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     await update.message.reply_text(f"Ton Telegram ID : `{uid}`", parse_mode="Markdown")
 
+async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Reçoit un vocal Telegram → transcrit via Gemini → répond + sauvegarde inbox."""
+    if not authorized(update.effective_user.id):
+        return
+    s = session(update.effective_user.id)
+    await update.message.chat.send_action("typing")
+
+    # Télécharger le fichier audio
+    voice = update.message.voice or update.message.audio
+    tg_file = await ctx.bot.get_file(voice.file_id)
+    import tempfile, httpx
+    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(tg_file.file_path)
+        Path(tmp_path).write_bytes(resp.content)
+
+    # Transcrire + répondre via Gemini
+    try:
+        audio_data = Path(tmp_path).read_bytes()
+        import base64
+        b64 = base64.b64encode(audio_data).decode()
+        vault_ctx = load_context(s["client"])
+        system = (
+            "Tu es l'assistant de Jarlounet, Brand Designer. "
+            "Transcris d'abord le message vocal, puis réponds de façon concise. "
+            "Format : [Transcription : ...]\n\n[Réponse : ...]\n\n"
+            + (f"Contexte client :\n{vault_ctx}" if vault_ctx else "")
+        )
+        r = gemini.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[
+                types.Content(role="user", parts=[types.Part(text=system)]),
+                types.Content(role="model", parts=[types.Part(text="Compris.")]),
+                types.Content(role="user", parts=[
+                    types.Part(inline_data=types.Blob(mime_type="audio/ogg", data=audio_data)),
+                    types.Part(text="Transcris ce message vocal et réponds.")
+                ])
+            ],
+            config=types.GenerateContentConfig(max_output_tokens=800)
+        )
+        reply = r.text
+    except Exception as e:
+        reply = f"⚠️ Transcription échouée : {e}"
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+    vault_name = next((k for k, v in VAULTS.items() if v == VAULT), "connaissance")
+    indicator = f"\n\n🎙️ vocal · {vault_name} · {s['client']}"
+    await update.message.reply_text(reply + indicator)
+
+    # Sauvegarder dans inbox
+    save_to_inbox(s["client"], f"[VOCAL]\n{reply}")
+
 SAVE_TRIGGERS = [
     "sauvegarde cette réponse", "sauvegarde la réponse", "garde ça dans inbox",
     "mets ça dans inbox", "enregistre cette réponse", "ajoute à inbox",
@@ -473,6 +528,7 @@ def main():
     app.add_handler(CommandHandler("reset",   cmd_reset))
     app.add_handler(CommandHandler("myid",    cmd_myid))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
 
     print(f"🚀 Projet Hermes démarré — vault : {VAULT}")
     app.run_polling()

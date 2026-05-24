@@ -96,9 +96,11 @@ async def send_digest():
         "Tu es l'assistant de Jarlounet, Brand Designer. "
         "Voici les signaux captés aujourd'hui dans son système de connaissance. "
         "Génère un digest de fin de journée en 3 parties, dans cet ordre :\n"
-        "1. **Ce qui s'est passé** — 1-2 lignes max\n"
-        "2. **Propositions pour demain** — 2 ou 3 actions concrètes, pas plus\n"
-        "3. **Point de vigilance** — une seule chose si tu en vois une, sinon rien\n\n"
+        "📌 Ce qui s'est passé — 1-2 lignes max\n"
+        "→ Propositions pour demain — 2 ou 3 actions concrètes, pas plus\n"
+        "⚠️ Point de vigilance — une seule chose si tu en vois une, sinon omets cette section\n\n"
+        "IMPORTANT : texte brut uniquement, pas de Markdown, pas d'astérisques, pas de #. "
+        "Utilise des tirets ou des émojis pour structurer. "
         "Ton direct, sans intro, sans flatterie, en français.\n\n"
         + "\n\n".join(blocks)
     )
