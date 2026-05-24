@@ -461,8 +461,8 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     vault_name = next((k for k, v in VAULTS.items() if v == VAULT), "connaissance")
     indicator = f"\n\n🎙️ vocal · {vault_name} · {s['client']}"
-    for chunk in split_message(reply + indicator):
-        await update.message.reply_text(chunk)
+    for chunk in split_message(md_to_html(reply) + indicator):
+        await update.message.reply_text(chunk, parse_mode="HTML")
 
     # Sauvegarder dans inbox
     save_to_inbox(s["client"], f"[VOCAL]\n{reply}")
@@ -574,6 +574,23 @@ def detect_web_intent(text: str) -> bool:
 
 def strip_accents(s: str) -> str:
     return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+
+def md_to_html(text: str) -> str:
+    """Convertit Markdown basique → HTML Telegram. Escape les chars dangereux."""
+    import re
+    # Escape HTML d'abord
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # **bold** ou __bold__
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'__(.+?)__', r'<b>\1</b>', text)
+    # *italic* ou _italic_
+    text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
+    text = re.sub(r'(?<!\w)_(.+?)_(?!\w)', r'<i>\1</i>', text)
+    # `code`
+    text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+    # ```bloc```
+    text = re.sub(r'```[\w]*\n?(.*?)```', r'<pre>\1</pre>', text, flags=re.DOTALL)
+    return text
 
 def split_message(text: str, limit: int = 4000) -> list[str]:
     """Découpe un texte long en blocs ≤ limit chars, en coupant aux paragraphes."""
@@ -781,9 +798,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     vault_name = next((k for k, v in VAULTS.items() if v == active_vault), "connaissance")
     web_tag = " · 🌐" if use_web else ""
     indicator = f"\n\n📂 {vault_name} · {s['client']}{web_tag}"
-    chunks = split_message(reply + indicator)
-    for chunk in chunks:
-        await update.message.reply_text(chunk)
+    for chunk in split_message(md_to_html(reply) + indicator):
+        await update.message.reply_text(chunk, parse_mode="HTML")
 
     # Suggestion de skill après 4+ échanges
     exchanges = len(s["history"]) // 2
