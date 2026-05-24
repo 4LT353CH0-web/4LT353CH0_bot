@@ -100,6 +100,21 @@ def search_vault(query: str, max_results: int = 4) -> str:
         results.append(f"### {rel}\n{excerpt}")
     return "\n\n---\n\n".join(results)
 
+def load_aliases() -> dict[str, str]:
+    """Charge les aliases depuis clients/_global/aliases.md."""
+    aliases = {}
+    f = VAULT / "clients" / "_global" / "aliases.md"
+    if not f.exists():
+        return aliases
+    for line in f.read_text().splitlines():
+        if "→" in line and not line.startswith("#"):
+            parts = line.split("→", 1)
+            if len(parts) == 2:
+                alias = strip_accents(parts[0].strip().lower())
+                target = parts[1].strip()
+                aliases[alias] = target
+    return aliases
+
 def list_clients() -> list[str]:
     d = VAULT / "clients"
     return sorted(x.name for x in d.iterdir() if x.is_dir()) if d.exists() else []
@@ -216,6 +231,28 @@ async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     session(update.effective_user.id)["history"] = []
     await update.message.reply_text("🔄 Historique vidé.")
 
+SAVE_TRIGGERS = [
+    "sauvegarde cette réponse", "sauvegarde la réponse", "garde ça dans inbox",
+    "mets ça dans inbox", "enregistre cette réponse", "ajoute à inbox",
+    "save to inbox", "keep this", "garde cette conclusion"
+]
+
+def save_to_inbox(client_name: str, content: str) -> bool:
+    """Sauvegarde une réponse du bot dans _inbox/ pour traitement Claude Code."""
+    ts = datetime.now().strftime("%Y-%m-%d-%H-%M")
+    filename = f"bot-{ts}-{client_name}.md"
+    target = VAULT / "_inbox" / filename
+    header = f"# Bot Hermes — {client_name} — {ts}\n\n"
+    target.write_text(header + content)
+    try:
+        subprocess.run(["git", "add", str(target)], cwd=VAULT, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", f"bot → inbox : {client_name} {ts}"],
+                       cwd=VAULT, check=True, capture_output=True)
+        subprocess.run(["git", "push"], cwd=VAULT, check=True, capture_output=True)
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
 MEMO_TRIGGERS = [
     "note ça", "note ca", "ajoute", "sauvegarde", "retiens",
     "mets dans inbox", "rappel", "mémorise", "memorise",
@@ -230,8 +267,14 @@ def strip_accents(s: str) -> str:
     return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
 
 def detect_client(text: str) -> str | None:
-    """Détecte un nom de client dans le message. Retourne le nom ou None."""
+    """Détecte un client via alias ou nom de dossier. Retourne le nom ou None."""
     t = strip_accents(text.lower())
+    # Aliases en priorité (plus longs d'abord pour éviter les faux positifs)
+    aliases = load_aliases()
+    for alias in sorted(aliases.keys(), key=len, reverse=True):
+        if alias in t:
+            return aliases[alias]
+    # Fallback : nom de dossier direct
     for client in list_clients():
         if client != "_global" and strip_accents(client) in t:
             return client
@@ -250,6 +293,23 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         s["history"] = []  # nouveau contexte = reset historique
 
     vault_ctx = load_context(s["client"])
+
+    # Sauvegarde dernière réponse dans _inbox/
+    if any(t in user_text.lower() for t in SAVE_TRIGGERS):
+        last_reply = next(
+            (h["parts"][0] for h in reversed(s["history"]) if h["role"] == "model"), None
+        )
+        if last_reply:
+            pushed = save_to_inbox(s["client"], last_reply)
+            status = "✓ pushé GitHub" if pushed else "(push échoué)"
+            await update.message.reply_text(
+                f"📥 Réponse sauvegardée dans `_inbox/` {status}\n"
+                f"Claude Code la traitera à la prochaine session.",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text("Pas de réponse récente à sauvegarder.")
+        return
 
     # Détection intention memo en langage naturel
     if detect_memo_intent(user_text):
