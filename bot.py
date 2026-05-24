@@ -428,7 +428,11 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     reply = r.text
     s["history"].append({"role": "model", "parts": [reply]})
-    await update.message.reply_text(reply)
+
+    # Indicateur vault + client (discret, en italique)
+    vault_name = next((k for k, v in VAULTS.items() if v == active_vault), "connaissance")
+    indicator = f"\n\n_📂 {vault_name} · {s['client']}_"
+    await update.message.reply_text(reply + indicator, parse_mode="Markdown")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
