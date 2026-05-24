@@ -849,6 +849,56 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
 
+    # Gateway Discord (bidirectionnel) en thread parallèle
+    import threading, gateway_discord
+
+    async def discord_handler(text: str, user_id: int, reply_fn):
+        """Même logique que handle_message mais pour Discord."""
+        s = session(user_id)
+        detected = detect_client(text)
+        if detected and detected != s["client"]:
+            storage.set_client(user_id, detected)
+            storage.reset_history(user_id)
+            s["client"] = detected
+        vault_ctx  = load_context(s["client"])
+        active_vault = detect_vault(text)
+        vault_search = search_vault(text, vault=active_vault)
+        topic_ctx  = []
+        for folder in detect_topics(text):
+            topic_dir = VAULT / folder
+            if topic_dir.exists():
+                for md in sorted(topic_dir.glob("*.md"))[:2]:
+                    topic_ctx.append(f"### {folder}/{md.name}\n{md.read_text()[:1500]}")
+        system = (
+            "Tu es l'assistant de Jarlounet, Brand Designer. "
+            "Ton direct, chaleureux, concis. Réponds en français sauf demande contraire.\n"
+            + (f"## Contexte client\n{vault_ctx}\n\n" if vault_ctx else "")
+            + (f"## Ressources domaine\n" + "\n\n---\n\n".join(topic_ctx) + "\n\n" if topic_ctx else "")
+            + (f"## Vault\n{vault_search}" if vault_search else "")
+        )
+        storage.add_message(user_id, "user", text)
+        s["history"].append({"role": "user", "parts": [text]})
+        contents = [
+            types.Content(role="user",  parts=[types.Part(text=system)]),
+            types.Content(role="model", parts=[types.Part(text="Compris.")]),
+        ]
+        for h in s["history"][-20:]:
+            contents.append(types.Content(role=h["role"], parts=[types.Part(text=h["parts"][0])]))
+        r = gemini.models.generate_content(
+            model=GEMINI_MODEL, contents=contents,
+            config=types.GenerateContentConfig(max_output_tokens=1500)
+        )
+        reply = r.text
+        storage.add_message(user_id, "model", reply)
+        vault_name = next((k for k, v in VAULTS.items() if v == active_vault), "connaissance")
+        await reply_fn(reply + f"\n\n📂 {vault_name} · {s['client']}")
+
+    threading.Thread(
+        target=gateway_discord.run_discord_gateway,
+        args=(discord_handler,),
+        daemon=True
+    ).start()
+
     print(f"🚀 Projet Hermes démarré — vault : {VAULT}")
     app.run_polling()
 
