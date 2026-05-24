@@ -305,6 +305,72 @@ async def cmd_myid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     await update.message.reply_text(f"Ton Telegram ID : `{uid}`", parse_mode="Markdown")
 
+async def cmd_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Recherche cross-sessions dans les conversations sauvegardées."""
+    if not authorized(update.effective_user.id):
+        return
+    if not ctx.args:
+        await update.message.reply_text("Usage : `/search [mot-clé]`", parse_mode="Markdown")
+        return
+    query = " ".join(ctx.args)
+    words = [strip_accents(w.lower()) for w in query.split() if len(w) > 2]
+    inbox = VAULT / "_inbox"
+    hits = []
+    for f in sorted(inbox.glob("conversation-*.md"), reverse=True)[:30]:
+        try:
+            content = strip_accents(f.read_text().lower())
+            score = sum(content.count(w) for w in words)
+            if score > 0:
+                hits.append((score, f))
+        except Exception:
+            pass
+    if not hits:
+        await update.message.reply_text(f"Aucune conversation trouvant '{query}'.")
+        return
+    hits.sort(reverse=True)
+    top = hits[:3]
+    results = []
+    for score, f in top:
+        excerpt = f.read_text()[:400]
+        results.append(f"📄 {f.name}\n{excerpt}...")
+    summary_prompt = (
+        f"Résume en 3-5 lignes ce que les conversations suivantes disent sur '{query}'. "
+        f"Direct, sans intro.\n\n" + "\n\n---\n\n".join(r.read_text()[:800] for _, r in top)
+    )
+    rs = gemini.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=summary_prompt,
+        config=types.GenerateContentConfig(max_output_tokens=400)
+    )
+    await update.message.reply_text(
+        f"🔍 Résultats pour '{query}' ({len(hits)} conversation(s)) :\n\n{rs.text}"
+    )
+
+async def cmd_monitor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """État du système Hermes."""
+    if not authorized(update.effective_user.id):
+        return
+    import shutil
+    # Vault stats
+    vault_files = len(list(VAULT.rglob("*.md")))
+    inbox_files = len(list((VAULT / "_inbox").glob("*.md"))) - 1  # -README
+    conversations = len(list((VAULT / "_inbox").glob("conversation-*.md")))
+    clients = list_clients()
+    # Disk (local)
+    disk = shutil.disk_usage(str(VAULT))
+    disk_free = disk.free // (1024**3)
+    status = (
+        f"🤖 Hermes — état système\n\n"
+        f"📁 Vault : {vault_files} fichiers .md\n"
+        f"📥 Inbox : {inbox_files} fichiers en attente\n"
+        f"💬 Conversations sauvegardées : {conversations}\n"
+        f"👥 Clients : {', '.join(c for c in clients if c != '_global')}\n"
+        f"💾 Espace disque libre : {disk_free} Go\n\n"
+        f"Vaults actifs :\n"
+        + "\n".join(f"  {'✅' if v.exists() else '❌'} {k}" for k, v in VAULTS.items())
+    )
+    await update.message.reply_text(status)
+
 async def cmd_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Sauvegarde la conversation en cours dans _inbox/ sans reset la session."""
     if not authorized(update.effective_user.id):
@@ -471,9 +537,20 @@ MEMO_TRIGGERS = [
     "add to inbox", "save this", "remember this"
 ]
 
+WEB_TRIGGERS = [
+    "cherche sur le web", "google ça", "google ca", "recherche en ligne",
+    "actualité", "actualites", "derniere version", "dernière version",
+    "c'est quoi", "c est quoi", "keski", "qu'est-ce que",
+    "prix de", "site de", "trouve moi", "search"
+]
+
 def detect_memo_intent(text: str) -> bool:
     t = text.lower()
     return any(trigger in t for trigger in MEMO_TRIGGERS)
+
+def detect_web_intent(text: str) -> bool:
+    t = strip_accents(text.lower())
+    return any(trigger in t for trigger in [strip_accents(w) for w in WEB_TRIGGERS])
 
 def strip_accents(s: str) -> str:
     return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
@@ -539,8 +616,48 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Fin de session → sauvegarder la conversation dans _inbox/
     t_lower = strip_accents(user_text.lower())
+
+    # Réponse à la suggestion de skill (validation humaine → _inbox/ uniquement)
+    if "skill oui" in t_lower and s.get("pending_skill"):
+        skill_name = s["pending_skill"]
+        skill_prompt = (
+            f"Crée un skill Claude Code nommé '{skill_name}' basé sur cette conversation. "
+            f"Format Markdown : ## Objectif, ## Quand l'utiliser, ## Étapes, ## Exemples. "
+            f"Concis, actionnable, en français.\n\n"
+            + "\n".join(h["parts"][0] for h in s["history"][-8:])
+        )
+        rs = gemini.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=skill_prompt,
+            config=types.GenerateContentConfig(max_output_tokens=800)
+        )
+        skill_slug = strip_accents(skill_name.lower().replace(" ", "-"))
+        ts_skill = datetime.now().strftime("%Y-%m-%d-%H-%M")
+        target = VAULT / "_inbox" / f"skill-suggestion-{ts_skill}-{skill_slug}.md"
+        target.write_text(
+            f"# Skill suggéré : {skill_name}\n\n"
+            f"> Valider en session Claude Code → déplacer vers `.claude/commands/{skill_slug}.md`\n\n"
+            f"{rs.text}"
+        )
+        try:
+            subprocess.run(["git", "add", str(target)], cwd=VAULT, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", f"skill suggestion : {skill_name}"], cwd=VAULT, check=True, capture_output=True)
+            subprocess.run(["git", "push"], cwd=VAULT, check=True, capture_output=True)
+        except Exception:
+            pass
+        s["pending_skill"] = None
+        await update.message.reply_text(
+            f"✅ Skill '{skill_name}' en attente de validation dans _inbox/\n"
+            f"Claude Code te le proposera à la prochaine session locale."
+        )
+        return
+    elif "skill non" in t_lower and s.get("pending_skill"):
+        s["pending_skill"] = None
+        await update.message.reply_text("Skill ignoré.")
+        return
+
+    # Fin de session → sauvegarder la conversation dans _inbox/
     if any(trigger in t_lower for trigger in SESSION_END_TRIGGERS) and len(s["history"]) >= 2:
         pushed = extract_and_save_conversation(s["client"], s["history"])
         status = "✓ pushé GitHub" if pushed else "(push local uniquement)"
@@ -595,19 +712,52 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ))
     contents.append(types.Content(role="user", parts=[types.Part(text=user_text)]))
 
+    # Browser : activer Google Search si intent web détecté
+    use_web = detect_web_intent(user_text)
+    gen_config = types.GenerateContentConfig(
+        max_output_tokens=1500,
+        tools=[types.Tool(google_search=types.GoogleSearch())] if use_web else []
+    )
+
     r = gemini.models.generate_content(
         model=GEMINI_MODEL,
         contents=contents,
-        config=types.GenerateContentConfig(max_output_tokens=1500)
+        config=gen_config
     )
 
     reply = r.text
     s["history"].append({"role": "model", "parts": [reply]})
 
-    # Indicateur vault + client (discret, en italique)
+    # Indicateur vault + client + web si utilisé
     vault_name = next((k for k, v in VAULTS.items() if v == active_vault), "connaissance")
-    indicator = f"\n\n📂 {vault_name} · {s['client']}"
+    web_tag = " · 🌐" if use_web else ""
+    indicator = f"\n\n📂 {vault_name} · {s['client']}{web_tag}"
     await update.message.reply_text(reply + indicator)
+
+    # Suggestion de skill après 4+ échanges
+    exchanges = len(s["history"]) // 2
+    if exchanges >= 4 and exchanges % 4 == 0:
+        skill_prompt = (
+            "Analyse cet échange. En une phrase : y a-t-il une bonne pratique, "
+            "un process ou une méthode réutilisable qui mérite d'être codifié en skill ? "
+            "Réponds UNIQUEMENT par 'OUI : [nom du skill suggéré]' ou 'NON'.\n\n"
+            + "\n".join(h["parts"][0] for h in s["history"][-6:])
+        )
+        try:
+            rs = gemini.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=skill_prompt,
+                config=types.GenerateContentConfig(max_output_tokens=50)
+            )
+            if rs.text.strip().upper().startswith("OUI"):
+                skill_name = rs.text.strip()[4:].strip()
+                s["pending_skill"] = skill_name
+                await update.message.reply_text(
+                    f"💡 Skill détecté : {skill_name}\n"
+                    f"Répondre 'skill oui' pour le créer dans le vault, 'skill non' pour ignorer."
+                )
+        except Exception:
+            pass
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -627,6 +777,8 @@ def main():
     app.add_handler(CommandHandler("reset",   cmd_reset))
     app.add_handler(CommandHandler("myid",    cmd_myid))
     app.add_handler(CommandHandler("save",    cmd_save))
+    app.add_handler(CommandHandler("search",  cmd_search))
+    app.add_handler(CommandHandler("monitor", cmd_monitor))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
 
