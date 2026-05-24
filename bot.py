@@ -333,6 +333,11 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Tu es l'assistant de Jarlounet, Brand Designer. "
             "Transcris d'abord le message vocal, puis réponds de façon concise. "
             "Format : [Transcription : ...]\n\n[Réponse : ...]\n\n"
+            "LIMITES STRICTES — tu ne peux PAS : créer des alertes, programmer des rappels, "
+            "accéder à un calendrier, envoyer des emails, mémoriser entre les sessions. "
+            "Si on te demande ça, dis-le clairement et propose une alternative réelle "
+            "(ex: /memo pour ancrer dans le vault, n8n pour automatiser). "
+            "Ne simule JAMAIS une action que tu n'as pas faite.\n\n"
             + (f"Contexte client :\n{vault_ctx}" if vault_ctx else "")
         )
         r = gemini.models.generate_content(
@@ -345,7 +350,7 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     types.Part(text="Transcris ce message vocal et réponds.")
                 ])
             ],
-            config=types.GenerateContentConfig(max_output_tokens=800)
+            config=types.GenerateContentConfig(max_output_tokens=1500)
         )
         reply = r.text
     except Exception as e:
@@ -473,7 +478,11 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Ton direct, chaleureux, concis. Pas de flatterie. "
         "Réponds en français sauf demande contraire. "
         "Si l'utilisateur te demande de sauvegarder ou noter quelque chose, "
-        "dis-lui d'utiliser la commande /memo [info].\n\n"
+        "dis-lui d'utiliser la commande /memo [info].\n"
+        "LIMITES STRICTES — tu ne peux PAS : créer des alertes, programmer des rappels, "
+        "accéder à un calendrier, envoyer des emails, mémoriser entre les sessions. "
+        "Si on te demande ça, dis-le clairement et propose une alternative réelle. "
+        "Ne simule JAMAIS une action que tu n'as pas faite.\n\n"
         + (f"## Contexte client\n{vault_ctx}\n\n" if vault_ctx else "")
         + (f"## Ressources domaine\n{topic_content}\n\n" if topic_content else "")
         + (f"## Ressources pertinentes du vault\n{vault_search}" if vault_search else "")
