@@ -442,7 +442,8 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     vault_name = next((k for k, v in VAULTS.items() if v == VAULT), "connaissance")
     indicator = f"\n\n🎙️ vocal · {vault_name} · {s['client']}"
-    await update.message.reply_text(reply + indicator)
+    for chunk in split_message(reply + indicator):
+        await update.message.reply_text(chunk)
 
     # Sauvegarder dans inbox
     save_to_inbox(s["client"], f"[VOCAL]\n{reply}")
@@ -554,6 +555,30 @@ def detect_web_intent(text: str) -> bool:
 
 def strip_accents(s: str) -> str:
     return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+
+def split_message(text: str, limit: int = 4000) -> list[str]:
+    """Découpe un texte long en blocs ≤ limit chars, en coupant aux paragraphes."""
+    if len(text) <= limit:
+        return [text]
+    chunks = []
+    current = ""
+    for paragraph in text.split("\n\n"):
+        candidate = (current + "\n\n" + paragraph).lstrip()
+        if len(candidate) <= limit:
+            current = candidate
+        else:
+            # Le paragraphe lui-même est trop long → couper aux phrases
+            if current:
+                chunks.append(current)
+                current = ""
+            if len(paragraph) <= limit:
+                current = paragraph
+            else:
+                for i in range(0, len(paragraph), limit):
+                    chunks.append(paragraph[i:i+limit])
+    if current:
+        chunks.append(current)
+    return chunks
 
 def detect_client(text: str) -> str | None:
     """Détecte un client via alias ou nom de dossier. Retourne le nom ou None."""
@@ -732,7 +757,9 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     vault_name = next((k for k, v in VAULTS.items() if v == active_vault), "connaissance")
     web_tag = " · 🌐" if use_web else ""
     indicator = f"\n\n📂 {vault_name} · {s['client']}{web_tag}"
-    await update.message.reply_text(reply + indicator)
+    chunks = split_message(reply + indicator)
+    for chunk in chunks:
+        await update.message.reply_text(chunk)
 
     # Suggestion de skill après 4+ échanges
     exchanges = len(s["history"]) // 2
