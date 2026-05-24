@@ -305,6 +305,22 @@ async def cmd_myid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     await update.message.reply_text(f"Ton Telegram ID : `{uid}`", parse_mode="Markdown")
 
+async def cmd_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Sauvegarde la conversation en cours dans _inbox/ sans reset la session."""
+    if not authorized(update.effective_user.id):
+        return
+    s = session(update.effective_user.id)
+    if len(s["history"]) < 2:
+        await update.message.reply_text("Pas encore assez d'échanges à sauvegarder.")
+        return
+    await update.message.chat.send_action("typing")
+    pushed = extract_and_save_conversation(s["client"], s["history"])
+    status = "✓ pushé GitHub" if pushed else "(push local uniquement)"
+    await update.message.reply_text(
+        f"📥 Conversation sauvegardée dans _inbox/ {status}\n"
+        f"Actions extraites — Claude Code les traitera à la prochaine session."
+    )
+
 async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Reçoit un vocal Telegram → transcrit via Gemini → répond + sauvegarde inbox."""
     if not authorized(update.effective_user.id):
@@ -365,11 +381,73 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Sauvegarder dans inbox
     save_to_inbox(s["client"], f"[VOCAL]\n{reply}")
 
+# ── Mots-clés fin de session → auto-save conversation ────────────────────────
+SESSION_END_TRIGGERS = [
+    "fin", "stop", "bye", "ciao", "à plus", "a plus", "bonne nuit",
+    "merci", "on s'arrête", "on s arrete", "pause", "à demain", "a demain",
+    "c'est bon pour aujourd'hui", "c bon", "on park", "wrap"
+]
+
 SAVE_TRIGGERS = [
     "sauvegarde cette réponse", "sauvegarde la réponse", "garde ça dans inbox",
     "mets ça dans inbox", "enregistre cette réponse", "ajoute à inbox",
     "save to inbox", "keep this", "garde cette conclusion"
 ]
+
+def extract_and_save_conversation(client_name: str, history: list) -> bool:
+    """Analyse la conversation, extrait les actions, sauvegarde dans _inbox/."""
+    if len(history) < 2:
+        return False
+
+    # Reconstituer le transcript
+    transcript = []
+    for h in history:
+        role = "Jarl" if h["role"] == "user" else "Hermes"
+        transcript.append(f"**{role}** : {h['parts'][0]}")
+    transcript_text = "\n\n".join(transcript)
+
+    # Gemini extrait les actions
+    prompt = (
+        "Analyse cette conversation entre Jarlounet et son assistant Hermes. "
+        "Extrais UNIQUEMENT les actions concrètes, décisions, ou choses à faire mentionnées. "
+        "Format strict :\n"
+        "## Actions détectées\n"
+        "- [ ] Action 1\n"
+        "- [ ] Action 2\n\n"
+        "## Résumé de la conversation (2-3 lignes max)\n"
+        "[résumé]\n\n"
+        "Si aucune action détectée, écris '## Actions détectées\nAucune action identifiée.'\n"
+        "Pas d'intro, pas de commentaire, texte brut.\n\n"
+        f"--- CONVERSATION ---\n{transcript_text}"
+    )
+
+    try:
+        r = gemini.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(max_output_tokens=600)
+        )
+        analysis = r.text.strip()
+    except Exception:
+        analysis = "## Actions détectées\nAnalyse échouée.\n\n## Résumé\nConversation sauvegardée brute."
+
+    ts = datetime.now().strftime("%Y-%m-%d-%H-%M")
+    filename = f"conversation-{ts}-{client_name}.md"
+    target = VAULT / "_inbox" / filename
+    content = (
+        f"# Conversation Hermes — {client_name} — {ts}\n\n"
+        f"{analysis}\n\n"
+        f"---\n\n## Transcript complet\n\n{transcript_text}\n"
+    )
+    target.write_text(content)
+    try:
+        subprocess.run(["git", "add", str(target)], cwd=VAULT, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", f"conversation hermes : {client_name} {ts}"],
+                       cwd=VAULT, check=True, capture_output=True)
+        subprocess.run(["git", "push"], cwd=VAULT, check=True, capture_output=True)
+        return True
+    except subprocess.CalledProcessError:
+        return False
 
 def save_to_inbox(client_name: str, content: str) -> bool:
     """Sauvegarde une réponse du bot dans _inbox/ pour traitement Claude Code."""
@@ -461,6 +539,18 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Fin de session → sauvegarder la conversation dans _inbox/
+    t_lower = strip_accents(user_text.lower())
+    if any(trigger in t_lower for trigger in SESSION_END_TRIGGERS) and len(s["history"]) >= 2:
+        pushed = extract_and_save_conversation(s["client"], s["history"])
+        status = "✓ pushé GitHub" if pushed else "(push local uniquement)"
+        await update.message.reply_text(
+            f"📥 Conversation sauvegardée dans _inbox/ {status}\n"
+            f"Claude Code la traitera à la prochaine session locale — actions incluses."
+        )
+        s["history"] = []  # reset session
+        return
+
     active_vault = detect_vault(user_text)
     vault_search = search_vault(user_text, vault=active_vault)
 
@@ -536,6 +626,7 @@ def main():
     app.add_handler(CommandHandler("status",  cmd_status))
     app.add_handler(CommandHandler("reset",   cmd_reset))
     app.add_handler(CommandHandler("myid",    cmd_myid))
+    app.add_handler(CommandHandler("save",    cmd_save))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
 
