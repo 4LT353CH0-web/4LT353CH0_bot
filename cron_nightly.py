@@ -6,6 +6,7 @@ Collecte les signaux du jour → Gemini → Telegram
 
 import os
 import asyncio
+import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -106,9 +107,24 @@ async def send_digest():
     date_str = datetime.now().strftime("%d %b")
     message  = f"🌙 Digest Hermes — {date_str}\n\n{r.text}"
 
+    # 1. Envoyer sur Telegram
     bot = telegram.Bot(token=TOKEN)
     await bot.send_message(chat_id=int(CHAT_ID), text=message)
     print(f"[{datetime.now():%Y-%m-%d %H:%M}] ✓ Digest envoyé → {CHAT_ID}")
+
+    # 2. Sauvegarder dans _inbox/ pour digestion Claude Code
+    ts       = datetime.now().strftime("%Y-%m-%d-%H-%M")
+    filename = f"digest-nightly-{ts}.md"
+    target   = VAULT / "_inbox" / filename
+    target.write_text(f"# Digest Hermes — {date_str}\n\n{r.text}\n")
+    try:
+        subprocess.run(["git", "add", str(target)], cwd=VAULT, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", f"digest nightly : {ts}"],
+                       cwd=VAULT, check=True, capture_output=True)
+        subprocess.run(["git", "push"], cwd=VAULT, check=True, capture_output=True)
+        print(f"[{datetime.now():%Y-%m-%d %H:%M}] ✓ Digest → _inbox/{filename} + pushé GitHub")
+    except subprocess.CalledProcessError as e:
+        print(f"[{datetime.now():%Y-%m-%d %H:%M}] ⚠ Digest sauvegardé localement mais push échoué : {e}")
 
 if __name__ == "__main__":
     asyncio.run(send_digest())
