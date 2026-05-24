@@ -6,6 +6,7 @@ Multi-client, validation humaine, pas d'auto-modification
 
 import os
 import asyncio
+import subprocess
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
@@ -60,7 +61,8 @@ def list_clients() -> list[str]:
     d = VAULT / "clients"
     return sorted(x.name for x in d.iterdir() if x.is_dir()) if d.exists() else []
 
-def append_memory(client_name: str, info: str):
+def append_memory(client_name: str, info: str) -> bool:
+    """Écrit dans memory.md et commit+push sur GitHub. Retourne True si push ok."""
     if client_name == "_global":
         target = VAULT / "clients" / "_global" / "memory.md"
     else:
@@ -69,6 +71,15 @@ def append_memory(client_name: str, info: str):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     with open(target, "a") as f:
         f.write(f"\n- [{ts}] {info}")
+    # Sync git
+    msg = f"memo [{client_name}] : {info[:60]}"
+    try:
+        subprocess.run(["git", "add", str(target)], cwd=VAULT, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", msg], cwd=VAULT, check=True, capture_output=True)
+        subprocess.run(["git", "push"], cwd=VAULT, check=True, capture_output=True)
+        return True
+    except subprocess.CalledProcessError:
+        return False
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -121,8 +132,9 @@ async def cmd_memo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     s = session(update.effective_user.id)
     info = " ".join(ctx.args)
-    append_memory(s["client"], info)
-    await update.message.reply_text(f"✅ Ancré dans `{s['client']}/memory.md`", parse_mode="Markdown")
+    pushed = append_memory(s["client"], info)
+    suffix = " + pushé sur GitHub" if pushed else " (push échoué, check git)"
+    await update.message.reply_text(f"✅ Ancré dans `{s['client']}/memory.md`{suffix}", parse_mode="Markdown")
 
 async def cmd_gold(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(update.effective_user.id):
