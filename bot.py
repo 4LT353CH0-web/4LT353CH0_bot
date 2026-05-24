@@ -36,9 +36,14 @@ VAULTS = {
 
 VAULT_TRIGGERS: dict[str, list[str]] = {
     "musique":   ["musique", "instrument", "composition", "accord", "melodie",
-                  "chanson", "harmonie", "partition", "theorie musicale"],
+                  "chanson", "harmonie", "partition", "theorie musicale",
+                  "synthe", "synthetiseur", "moog", "dfam", "eurorack", "modulaire",
+                  "ableton", "logic pro", "daw", "mixage", "mastering", "studio",
+                  "batterie", "guitare", "basse", "sample", "sampler", "beatmaking",
+                  "drum machine", "sequenceur", "arpege", "midi", "vst"],
     "creative":  ["creative coding", "processing", "sketch", "generatif",
-                  "p5js", "p5", "openframeworks", "glsl", "shader", "visuel"],
+                  "p5js", "p5", "openframeworks", "glsl", "shader", "visuel",
+                  "touchdesigner", "max msp", "supercollider", "osc"],
     "opendesign":["opendesign", "open design", "figma open"],
 }
 
