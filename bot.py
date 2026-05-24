@@ -17,8 +17,10 @@ from telegram.ext import (
 )
 from google import genai
 from google.genai import types
+import storage
 
 load_dotenv()
+storage.init_db()
 
 # ── Config ────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
@@ -60,13 +62,15 @@ def detect_vault(text: str) -> Path:
 gemini = genai.Client(api_key=GEMINI_KEY)
 GEMINI_MODEL = "gemini-2.5-flash"
 
-# ── Sessions en mémoire : {user_id: {client, history}} ───────────────────────
-sessions: dict = {}
+# ── Sessions SQLite persistantes ──────────────────────────────────────────────
+_session_cache: dict = {}  # cache in-memory pour pending_skill uniquement
 
 def session(uid: int) -> dict:
-    if uid not in sessions:
-        sessions[uid] = {"client": "_global", "history": []}
-    return sessions[uid]
+    """Charge depuis SQLite. Cache pending_skill en RAM (éphémère ok)."""
+    s = storage.get_session(uid)
+    if uid in _session_cache:
+        s["pending_skill"] = _session_cache[uid].get("pending_skill")
+    return s
 
 def authorized(uid: int) -> bool:
     return not WHITELIST or uid in WHITELIST
@@ -248,8 +252,8 @@ async def cmd_client(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if name not in list_clients() and name != "_global":
         await update.message.reply_text(f"❌ Client `{name}` non trouvé.\n/clients pour la liste.", parse_mode="Markdown")
         return
-    s["client"] = name
-    s["history"] = []  # reset historique au changement de client
+    storage.set_client(update.effective_user.id, name)
+    storage.reset_history(update.effective_user.id)
     await update.message.reply_text(f"✅ Contexte chargé : `{name}`", parse_mode="Markdown")
 
 async def cmd_memo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -298,7 +302,7 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(update.effective_user.id):
         return
-    session(update.effective_user.id)["history"] = []
+    storage.reset_history(update.effective_user.id)
     await update.message.reply_text("🔄 Historique vidé.")
 
 async def cmd_myid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -313,38 +317,53 @@ async def cmd_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage : `/search [mot-clé]`", parse_mode="Markdown")
         return
     query = " ".join(ctx.args)
+    uid = update.effective_user.id
+
+    # 1. FTS5 SQLite (messages directs)
+    fts_hits = storage.search_messages(query, user_id=uid, limit=5)
+
+    # 2. Grep fichiers conversations _inbox/
     words = [strip_accents(w.lower()) for w in query.split() if len(w) > 2]
     inbox = VAULT / "_inbox"
-    hits = []
+    file_hits = []
     for f in sorted(inbox.glob("conversation-*.md"), reverse=True)[:30]:
         try:
             content = strip_accents(f.read_text().lower())
             score = sum(content.count(w) for w in words)
             if score > 0:
-                hits.append((score, f))
+                file_hits.append((score, f))
         except Exception:
             pass
-    if not hits:
-        await update.message.reply_text(f"Aucune conversation trouvant '{query}'.")
+    file_hits.sort(reverse=True)
+
+    if not fts_hits and not file_hits:
+        await update.message.reply_text(f"Aucun résultat pour '{query}'.")
         return
-    hits.sort(reverse=True)
-    top = hits[:3]
-    results = []
-    for score, f in top:
-        excerpt = f.read_text()[:400]
-        results.append(f"📄 {f.name}\n{excerpt}...")
+
+    # Construire le contexte pour résumé
+    blocks = []
+    if fts_hits:
+        blocks.append("## Messages directs\n" + "\n".join(
+            f"[{h['ts'][:10]} {h['role']}] {h['content'][:300]}" for h in fts_hits
+        ))
+    if file_hits:
+        top_files = file_hits[:2]
+        blocks.append("## Conversations sauvegardées\n" + "\n\n---\n\n".join(
+            f.read_text()[:600] for _, f in top_files
+        ))
+
     summary_prompt = (
-        f"Résume en 3-5 lignes ce que les conversations suivantes disent sur '{query}'. "
-        f"Direct, sans intro.\n\n" + "\n\n---\n\n".join(r.read_text()[:800] for _, r in top)
+        f"Résume en 3-5 lignes ce que ces échanges disent sur '{query}'. "
+        f"Direct, sans intro.\n\n" + "\n\n".join(blocks)
     )
     rs = gemini.models.generate_content(
         model=GEMINI_MODEL,
         contents=summary_prompt,
         config=types.GenerateContentConfig(max_output_tokens=400)
     )
-    await update.message.reply_text(
-        f"🔍 Résultats pour '{query}' ({len(hits)} conversation(s)) :\n\n{rs.text}"
-    )
+    total = len(fts_hits) + len(file_hits)
+    for chunk in split_message(f"🔍 '{query}' — {total} résultat(s)\n\n{rs.text}"):
+        await update.message.reply_text(chunk)
 
 async def cmd_monitor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """État du système Hermes."""
@@ -603,8 +622,10 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Détection automatique du client dans le message
     detected = detect_client(user_text)
     if detected and detected != s["client"]:
+        storage.set_client(uid, detected)
+        storage.reset_history(uid)
         s["client"] = detected
-        s["history"] = []  # nouveau contexte = reset historique
+        s["history"] = []
 
     vault_ctx = load_context(s["client"])
 
@@ -690,7 +711,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"📥 Conversation sauvegardée dans _inbox/ {status}\n"
             f"Claude Code la traitera à la prochaine session locale — actions incluses."
         )
-        s["history"] = []  # reset session
+        storage.reset_history(uid)
+        s["history"] = []
         return
 
     active_vault = detect_vault(user_text)
@@ -720,6 +742,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         + (f"## Ressources pertinentes du vault\n{vault_search}" if vault_search else "")
     )
 
+    storage.add_message(uid, "user", user_text)
     s["history"].append({"role": "user", "parts": [user_text]})
     history = s["history"][-20:]
 
@@ -751,6 +774,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
     reply = r.text
+    storage.add_message(uid, "model", reply)
     s["history"].append({"role": "model", "parts": [reply]})
 
     # Indicateur vault + client + web si utilisé
