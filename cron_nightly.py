@@ -120,15 +120,15 @@ async def send_digest():
 
     # 2. Envoyer sur Discord #n8n-news
     try:
-        payload = json.dumps({"content": message}).encode()
-        req = urllib.request.Request(
-            DISCORD_WEBHOOK,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
+        url = DISCORD_WEBHOOK.strip()
+        payload = json.dumps({"content": message}).encode("utf-8")
+        req = urllib.request.Request(url, data=payload, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("User-Agent", "HermesBot/1.0")
         with urllib.request.urlopen(req, timeout=10) as resp:
             print(f"[{datetime.now():%Y-%m-%d %H:%M}] ✓ Discord → HTTP {resp.status}")
+    except urllib.error.HTTPError as e:
+        print(f"[{datetime.now():%Y-%m-%d %H:%M}] ⚠ Discord HTTP {e.code} : {e.read().decode()}")
     except Exception as e:
         print(f"[{datetime.now():%Y-%m-%d %H:%M}] ⚠ Discord échoué : {e}")
 
