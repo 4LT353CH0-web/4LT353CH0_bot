@@ -134,18 +134,30 @@ def search_vault(query: str, max_results: int = 4, vault: Path = None) -> str:
     return "\n\n---\n\n".join(results)
 
 def load_topics() -> dict[str, str]:
-    """Charge les topics depuis clients/_global/topics.md → {mot-clé: dossier}."""
+    """Charge les topics depuis topics.md + auto-découverte des dossiers numérotés non listés."""
     topics = {}
     f = VAULT / "clients" / "_global" / "topics.md"
-    if not f.exists():
-        return topics
-    for line in f.read_text().splitlines():
-        if "→" in line and not line.startswith("#"):
-            parts = line.split("→", 1)
-            if len(parts) == 2:
-                keyword = strip_accents(parts[0].strip().lower())
-                folder = parts[1].strip()
-                topics[keyword] = folder
+    if f.exists():
+        for line in f.read_text().splitlines():
+            if "→" in line and not line.startswith("#"):
+                parts = line.split("→", 1)
+                if len(parts) == 2:
+                    keyword = strip_accents(parts[0].strip().lower())
+                    folder = parts[1].strip()
+                    topics[keyword] = folder
+
+    # Auto-découverte : dossiers numérotés (ex: 16-nouveau) absents de topics.md
+    listed_folders = set(topics.values())
+    for d in sorted(VAULT.iterdir()):
+        if not d.is_dir() or d.name.startswith("_") or d.name.startswith("."):
+            continue
+        # Dossier numéroté type "16-nom-du-domaine"
+        parts = d.name.split("-", 1)
+        if len(parts) == 2 and parts[0].isdigit() and d.name not in listed_folders:
+            # Ajouter le nom du dossier (sans numéro) comme keyword de secours
+            keyword = strip_accents(parts[1].replace("-", " "))
+            topics[keyword] = d.name
+
     return topics
 
 def detect_topics(text: str) -> list[str]:
