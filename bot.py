@@ -51,10 +51,19 @@ def load_context(client_name: str) -> str:
 
     # Contexte client
     if client_name != "_global":
-        for fname, label in [("voice.md", "Voix"), ("memory.md", "Contexte actif")]:
-            f = VAULT / "clients" / client_name / fname
+        client_dir = VAULT / "clients" / client_name
+        # Fichiers clés en priorité
+        priority = ["voice.md", "memory.md", "brief.md", "README.md"]
+        loaded = set()
+        for fname in priority:
+            f = client_dir / fname
             if f.exists():
-                parts.append(f"## {label} — {client_name}\n{f.read_text()}")
+                parts.append(f"## {fname} — {client_name}\n{f.read_text()[:3000]}")
+                loaded.add(fname)
+        # Autres .md à la racine (hors sous-dossiers), max 2000 chars chacun
+        for f in sorted(client_dir.glob("*.md")):
+            if f.name not in loaded and len(parts) < 8:
+                parts.append(f"## {f.name} — {client_name}\n{f.read_text()[:2000]}")
 
     return "\n\n---\n\n".join(parts) if parts else ""
 
