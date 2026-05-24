@@ -68,6 +68,38 @@ def load_context(client_name: str) -> str:
 
     return "\n\n---\n\n".join(parts) if parts else ""
 
+def search_vault(query: str, max_results: int = 4) -> str:
+    """RAG basique : cherche les fichiers les plus pertinents par mots-clés."""
+    EXCLUDE = {"_inbox", "dialogue-archive", "done", "assets"}
+    stopwords = {"pour", "dans", "avec", "quoi", "comment", "est", "que", "les", "des", "une", "qui"}
+    words = [strip_accents(w) for w in query.lower().split()
+             if len(w) > 3 and w not in stopwords]
+    if not words:
+        return ""
+
+    scores: dict = {}
+    for md in VAULT.rglob("*.md"):
+        if any(p in md.parts for p in EXCLUDE):
+            continue
+        try:
+            content = strip_accents(md.read_text().lower())
+            score = sum(content.count(w) for w in words)
+            if score > 0:
+                scores[md] = score
+        except Exception:
+            pass
+
+    top = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:max_results]
+    if not top:
+        return ""
+
+    results = []
+    for f, _ in top:
+        excerpt = f.read_text()[:1500]
+        rel = str(f.relative_to(VAULT))
+        results.append(f"### {rel}\n{excerpt}")
+    return "\n\n---\n\n".join(results)
+
 def list_clients() -> list[str]:
     d = VAULT / "clients"
     return sorted(x.name for x in d.iterdir() if x.is_dir()) if d.exists() else []
@@ -235,13 +267,16 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    vault_search = search_vault(user_text)
+
     system = (
         "Tu es l'assistant de Jarlounet, Brand Designer. "
         "Ton direct, chaleureux, concis. Pas de flatterie. "
         "Réponds en français sauf demande contraire. "
         "Si l'utilisateur te demande de sauvegarder ou noter quelque chose, "
         "dis-lui d'utiliser la commande /memo [info].\n\n"
-        + (f"Contexte chargé :\n{vault_ctx}" if vault_ctx else "")
+        + (f"## Contexte client\n{vault_ctx}\n\n" if vault_ctx else "")
+        + (f"## Ressources pertinentes du vault\n{vault_search}" if vault_search else "")
     )
 
     s["history"].append({"role": "user", "parts": [user_text]})
