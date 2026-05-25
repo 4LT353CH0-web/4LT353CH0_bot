@@ -43,7 +43,7 @@ def run_discord_gateway(handle_fn):
 
     @client.event
     async def on_ready():
-        print(f"🎮 Discord gateway connectée : {client.user}")
+        print(f"🎮 Discord gateway connectée : {client.user}", flush=True)
 
     @client.event
     async def on_message(message):
