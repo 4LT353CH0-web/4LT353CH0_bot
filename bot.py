@@ -18,6 +18,7 @@ from telegram.ext import (
 from google import genai
 from google.genai import types
 import storage
+import calendar_google as gcal
 
 load_dotenv()
 storage.init_db()
@@ -224,6 +225,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "`/clients` — lister les clients\n"
         "`/memo [info]` — ancrer dans le vault\n"
         "`/gold [texte]` — distiller des idées actionnables\n"
+        "`/agenda [n]` — prochains événements Google Calendar\n"
+        "`/rdv titre | date | heure` — créer un événement\n"
+        "`/meet titre | date | heure` — créer un événement + lien Meet\n"
         "`/status` — état du système\n"
         "`/reset` — vider l'historique de session\n\n"
         "Ou envoie un message directement.",
@@ -390,6 +394,111 @@ async def cmd_monitor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(status)
 
+def _gcal_available() -> bool:
+    """Vérifie si le token Google Calendar est disponible."""
+    return (gcal.TOKEN_FILE.exists() or gcal.CREDENTIALS_FILE.exists())
+
+def _gemini_fn(prompt: str) -> str:
+    """Wrappeur synchrone Gemini pour le parsing de dates."""
+    r = gemini.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(max_output_tokens=200)
+    )
+    return r.text
+
+async def cmd_agenda(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Affiche les prochains événements Google Calendar."""
+    if not authorized(update.effective_user.id):
+        return
+    if not _gcal_available():
+        await update.message.reply_text(
+            "⚠️ Google Calendar non configuré.\n"
+            "Setup : <code>python3 calendar_google.py --auth</code> en local,\n"
+            "puis copier <code>token-gcal.json</code> sur le VPS.",
+            parse_mode="HTML"
+        )
+        return
+    n = int(ctx.args[0]) if ctx.args and ctx.args[0].isdigit() else 5
+    await update.message.chat.send_action("typing")
+    try:
+        events = gcal.get_upcoming_events(n)
+        text   = gcal.format_events_list(events)
+    except Exception as e:
+        text = f"⚠️ Erreur Calendar : {e}"
+    for chunk in split_message(text):
+        await update.message.reply_text(chunk, parse_mode="HTML")
+
+async def cmd_rdv(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Crée un événement. Usage : /rdv Titre du RDV | demain à 14h | 45min"""
+    if not authorized(update.effective_user.id):
+        return
+    if not _gcal_available():
+        await update.message.reply_text("⚠️ Google Calendar non configuré. Voir /agenda.")
+        return
+    if not ctx.args:
+        await update.message.reply_text(
+            "Usage : <code>/rdv Titre | demain à 14h | 45min</code>\n"
+            "Ou simplement : <code>/rdv Appel client lundi 10h</code>",
+            parse_mode="HTML"
+        )
+        return
+    raw = " ".join(ctx.args)
+    await update.message.chat.send_action("typing")
+    parsed = gcal.parse_event_args(raw, _gemini_fn)
+    if not parsed:
+        await update.message.reply_text("❌ Impossible de parser la date/heure. Essaie : /rdv Titre | 2026-05-28 | 14:00")
+        return
+    dt = gcal.build_event_datetime(parsed)
+    if not dt:
+        await update.message.reply_text("❌ Date invalide dans la réponse parsée.")
+        return
+    try:
+        event = gcal.create_event(
+            title        = parsed.get("title", raw),
+            start_dt     = dt,
+            duration_min = parsed.get("duration_min", 60),
+            with_meet    = parsed.get("with_meet", False),
+        )
+        await update.message.reply_text(gcal.format_created_event(event), parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Erreur création : {e}")
+
+async def cmd_meet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Crée un événement avec lien Meet. Usage : /meet Titre | demain à 15h"""
+    if not authorized(update.effective_user.id):
+        return
+    if not _gcal_available():
+        await update.message.reply_text("⚠️ Google Calendar non configuré. Voir /agenda.")
+        return
+    if not ctx.args:
+        await update.message.reply_text(
+            "Usage : <code>/meet Titre de la réunion | demain à 15h</code>",
+            parse_mode="HTML"
+        )
+        return
+    raw = " ".join(ctx.args)
+    await update.message.chat.send_action("typing")
+    parsed = gcal.parse_event_args(raw, _gemini_fn)
+    if not parsed:
+        await update.message.reply_text("❌ Impossible de parser la date/heure.")
+        return
+    parsed["with_meet"] = True
+    dt = gcal.build_event_datetime(parsed)
+    if not dt:
+        await update.message.reply_text("❌ Date invalide.")
+        return
+    try:
+        event = gcal.create_event(
+            title        = parsed.get("title", raw),
+            start_dt     = dt,
+            duration_min = parsed.get("duration_min", 60),
+            with_meet    = True,
+        )
+        await update.message.reply_text(gcal.format_created_event(event), parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Erreur création Meet : {e}")
+
 async def cmd_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Sauvegarde la conversation en cours dans _inbox/ sans reset la session."""
     if not authorized(update.effective_user.id):
@@ -434,10 +543,9 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Tu es l'assistant de Jarlounet, Brand Designer. "
             "Transcris d'abord le message vocal, puis réponds de façon concise. "
             "Format : [Transcription : ...]\n\n[Réponse : ...]\n\n"
-            "LIMITES STRICTES — tu ne peux PAS : créer des alertes, programmer des rappels, "
-            "accéder à un calendrier, envoyer des emails, mémoriser entre les sessions. "
-            "Si on te demande ça, dis-le clairement et propose une alternative réelle "
-            "(ex: /memo pour ancrer dans le vault, n8n pour automatiser). "
+            "LIMITES STRICTES — tu ne peux PAS : créer des alertes, envoyer des emails, "
+            "mémoriser entre les sessions. "
+            "Pour le calendrier Google : utilise /agenda, /rdv, /meet. "
             "Ne simule JAMAIS une action que tu n'as pas faite.\n\n"
             + (f"Contexte client :\n{vault_ctx}" if vault_ctx else "")
         )
@@ -550,6 +658,13 @@ def save_to_inbox(client_name: str, content: str) -> bool:
         return True
     except subprocess.CalledProcessError:
         return False
+
+CALENDAR_TRIGGERS = [
+    "agenda", "calendrier", "planning", "reunion", "réunion", "rendez-vous",
+    "suis libre", "je suis dispo", "disponible", "ce soir", "cette semaine",
+    "prochain meeting", "prochaine reunion", "quand est", "à quelle heure",
+    "mon planning", "mes rendez", "prochains events", "qu'est-ce que j'ai",
+]
 
 MEMO_TRIGGERS = [
     "note ça", "note ca", "ajoute", "sauvegarde", "retiens",
@@ -735,6 +850,16 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     active_vault = detect_vault(user_text)
     vault_search = search_vault(user_text, vault=active_vault)
 
+    # Injection agenda si sujet calendrier détecté
+    calendar_ctx = ""
+    t_cal = strip_accents(user_text.lower())
+    if _gcal_available() and any(trigger in t_cal for trigger in CALENDAR_TRIGGERS):
+        try:
+            events = gcal.get_upcoming_events(7)
+            calendar_ctx = gcal.events_to_context(events)
+        except Exception:
+            pass
+
     # Charger les fichiers des dossiers topic détectés
     topic_ctx = []
     for folder in detect_topics(user_text):
@@ -750,11 +875,12 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Réponds en français sauf demande contraire. "
         "Si l'utilisateur te demande de sauvegarder ou noter quelque chose, "
         "dis-lui d'utiliser la commande /memo [info].\n"
-        "LIMITES STRICTES — tu ne peux PAS : créer des alertes, programmer des rappels, "
-        "accéder à un calendrier, envoyer des emails, mémoriser entre les sessions. "
-        "Si on te demande ça, dis-le clairement et propose une alternative réelle. "
+        "LIMITES STRICTES — tu ne peux PAS : créer des alertes, envoyer des emails, "
+        "mémoriser entre les sessions. "
+        "Pour le calendrier Google : utilise /agenda, /rdv, /meet. "
         "Ne simule JAMAIS une action que tu n'as pas faite.\n\n"
         + (f"## Contexte client\n{vault_ctx}\n\n" if vault_ctx else "")
+        + (f"## Agenda Google Calendar (prochains événements)\n{calendar_ctx}\n\n" if calendar_ctx else "")
         + (f"## Ressources domaine\n{topic_content}\n\n" if topic_content else "")
         + (f"## Ressources pertinentes du vault\n{vault_search}" if vault_search else "")
     )
@@ -843,6 +969,9 @@ def main():
     app.add_handler(CommandHandler("status",  cmd_status))
     app.add_handler(CommandHandler("reset",   cmd_reset))
     app.add_handler(CommandHandler("myid",    cmd_myid))
+    app.add_handler(CommandHandler("agenda",  cmd_agenda))
+    app.add_handler(CommandHandler("rdv",     cmd_rdv))
+    app.add_handler(CommandHandler("meet",    cmd_meet))
     app.add_handler(CommandHandler("save",    cmd_save))
     app.add_handler(CommandHandler("search",  cmd_search))
     app.add_handler(CommandHandler("monitor", cmd_monitor))
