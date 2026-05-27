@@ -10,6 +10,8 @@ Setup (une seule fois) :
   5. Ajouter dans .env : GOOGLE_CALENDAR_ID=primary (ou l'ID exact du calendar)
 """
 
+from __future__ import annotations
+
 import os
 import sys
 import json
@@ -229,19 +231,22 @@ def parse_event_args(text: str, gemini_fn) -> dict | None:
     now_str = datetime.now(tz=TZ).strftime("%Y-%m-%d %H:%M (%A %d %B %Y)")
     prompt = (
         f"Aujourd'hui : {now_str}, fuseau Europe/Paris.\n"
-        f"Extrait les infos de cet événement et retourne UNIQUEMENT un objet JSON valide "
-        f"avec ces clés exactes :\n"
-        f'  "title": string,\n'
-        f'  "date": "YYYY-MM-DD",\n'
-        f'  "time": "HH:MM",\n'
-        f'  "duration_min": int (défaut 60),\n'
-        f'  "with_meet": bool\n'
-        f"Si la date ou l'heure est absente, utilise une valeur raisonnable. "
-        f"Si le texte ne décrit pas un événement, retourne null.\n\n"
+        f"Tu dois créer un événement Google Calendar. Extrais les infos du texte suivant "
+        f"et retourne UNIQUEMENT un JSON valide sur une ligne, sans markdown, sans explication :\n"
+        f'{{"title":"...", "date":"YYYY-MM-DD", "time":"HH:MM", "duration_min":60, "with_meet":false}}\n\n'
+        f"Règles :\n"
+        f"- title : le sujet de l'événement (retire les mots génériques comme 'rdv', 'réunion', 'créer')\n"
+        f"- date : si absente → {datetime.now(tz=TZ).strftime('%Y-%m-%d')} (aujourd'hui)\n"
+        f"- time : si absent → 09:00\n"
+        f"- duration_min : défaut 60\n"
+        f"- with_meet : true seulement si explicitement demandé\n"
+        f"Retourne TOUJOURS un JSON valide. Jamais null.\n\n"
         f"Texte : {text}"
     )
     raw = gemini_fn(prompt)
-    m = re.search(r"\{.*?\}", raw, re.DOTALL)
+    # Retirer les éventuels code fences markdown
+    raw = re.sub(r'```[a-z]*\n?', '', raw).strip('`').strip()
+    m = re.search(r'\{[^{}]*\}', raw, re.DOTALL)
     if not m:
         return None
     try:
@@ -258,6 +263,180 @@ def build_event_datetime(parsed: dict) -> datetime | None:
         dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
         return dt.replace(tzinfo=TZ)
     except (KeyError, ValueError):
+        return None
+
+
+# ── Lecture par ID ────────────────────────────────────────────────────────────
+
+def get_event_by_id(event_id: str) -> dict:
+    """Retourne un événement par son ID."""
+    service = get_service()
+    return service.events().get(calendarId=CALENDAR_ID, eventId=event_id).execute()
+
+
+# ── Parse planning (plusieurs events d'un coup) ────────────────────────────────
+
+def parse_event_list(text: str, gemini_fn) -> list[dict]:
+    """
+    Utilise Gemini pour extraire une liste d'événements depuis un planning textuel.
+    Retourne une liste de dicts {title, date, time, duration_min, with_meet}.
+    """
+    import re
+    now_str = datetime.now(tz=TZ).strftime("%Y-%m-%d %H:%M (%A %d %B %Y)")
+    today   = datetime.now(tz=TZ).strftime("%Y-%m-%d")
+    json_ex = '[{"title":"...","date":"YYYY-MM-DD","time":"HH:MM","duration_min":60,"with_meet":false}]'
+    prompt  = "\n".join([
+        "Aujourd'hui : " + now_str + ", fuseau Europe/Paris.",
+        "Extrais TOUS les événements de ce planning et retourne un JSON array :",
+        json_ex,
+        "- Un objet par événement",
+        "- date : utilise " + today + " comme base si l'année est absente",
+        "- time : 09:00 par défaut si absent",
+        "- duration_min : 60 par défaut",
+        "- with_meet : false par défaut",
+        "Retourne UNIQUEMENT le JSON array, sans markdown, sans explication.",
+        "",
+        "Planning :",
+        text,
+    ])
+    raw     = gemini_fn(prompt)
+    cleaned = re.sub(r'```[a-z]*\n?', '', raw).strip('`').strip()
+    m       = re.search(r'\[.*\]', cleaned, re.DOTALL)
+    if not m:
+        return []
+    try:
+        result = json.loads(m.group())
+        return result if isinstance(result, list) else []
+    except json.JSONDecodeError:
+        return []
+
+
+def parse_campagne_modif(events: list[dict], user_text: str, gemini_fn) -> list[dict]:
+    """
+    Applique une modification conversationnelle sur une liste d'événements en attente.
+    Ex : "décale le 2 à 14h", "Éric le 10 juin", "repousse tout d'une semaine"
+    Retourne la liste complète mise à jour.
+    """
+    import re
+    now_str = datetime.now(tz=TZ).strftime("%Y-%m-%d %H:%M (%A %d %B %Y)")
+    current_json = json.dumps(events, ensure_ascii=False)
+    prompt = "\n".join([
+        f"Aujourd'hui : {now_str}, fuseau Europe/Paris.",
+        "Ces événements sont en attente de création :",
+        current_json,
+        "",
+        f"L'utilisateur demande : \"{user_text}\"",
+        "",
+        "Applique la modification sur le ou les événements concernés.",
+        "Retourne la liste COMPLÈTE mise à jour, même format JSON :",
+        '[{"title":"...","date":"YYYY-MM-DD","time":"HH:MM","duration_min":60,"with_meet":false}]',
+        "Retourne UNIQUEMENT le JSON array, sans markdown, sans explication.",
+    ])
+    raw     = gemini_fn(prompt)
+    cleaned = re.sub(r'```[a-z]*\n?', '', raw).strip('`').strip()
+    m       = re.search(r'\[.*\]', cleaned, re.DOTALL)
+    if not m:
+        return events  # fallback : liste inchangée
+    try:
+        result = json.loads(m.group())
+        return result if isinstance(result, list) and len(result) == len(events) else events
+    except json.JSONDecodeError:
+        return events
+
+
+# ── Suppression ───────────────────────────────────────────────────────────────
+
+def delete_event(event_id: str) -> None:
+    """Supprime un événement par son ID."""
+    service = get_service()
+    service.events().delete(calendarId=CALENDAR_ID, eventId=event_id).execute()
+
+
+# ── Modification ──────────────────────────────────────────────────────────────
+
+def update_event(
+    event_id: str,
+    title: str | None = None,
+    start_dt: datetime | None = None,
+    duration_min: int | None = None,
+) -> dict:
+    """Met à jour titre et/ou horaire. Retourne l'événement mis à jour."""
+    service = get_service()
+    event = service.events().get(calendarId=CALENDAR_ID, eventId=event_id).execute()
+    if title:
+        event["summary"] = title
+    if start_dt:
+        dur = duration_min or 60
+        end_dt = start_dt + timedelta(minutes=dur)
+        event["start"] = {"dateTime": start_dt.isoformat(), "timeZone": "Europe/Paris"}
+        event["end"]   = {"dateTime": end_dt.isoformat(),   "timeZone": "Europe/Paris"}
+    elif duration_min and "dateTime" in event.get("start", {}):
+        orig = datetime.fromisoformat(event["start"]["dateTime"])
+        event["end"] = {
+            "dateTime": (orig + timedelta(minutes=duration_min)).isoformat(),
+            "timeZone": "Europe/Paris",
+        }
+    return service.events().update(calendarId=CALENDAR_ID, eventId=event_id, body=event).execute()
+
+
+def find_event_by_description(text: str, gemini_fn, n: int = 10) -> dict | None:
+    """Utilise Gemini pour trouver l'événement correspondant à une description NL."""
+    import re
+    events = get_upcoming_events(n)
+    if not events:
+        return None
+    now_str = datetime.now(tz=TZ).strftime("%Y-%m-%d %H:%M")
+    lines = []
+    for i, e in enumerate(events, 1):
+        title = e.get("summary", "(Sans titre)")
+        start = e["start"].get("dateTime") or e["start"].get("date", "")
+        try:
+            ts = datetime.fromisoformat(start).astimezone(TZ).strftime("%a %d/%m %H:%M") if "T" in start else start
+        except Exception:
+            ts = start
+        lines.append(f"{i}. {ts} : {title}")
+    prompt = (
+        f"Aujourd'hui : {now_str}.\n"
+        f"Événements à venir :\n" + "\n".join(lines) + "\n\n"
+        f"Référence de l'utilisateur : \"{text}\"\n"
+        f"Retourne UNIQUEMENT le numéro (1–{len(events)}) correspondant, ou 0 si aucun. "
+        f"Chiffre seul, sans explication."
+    )
+    raw = gemini_fn(prompt).strip()
+    m = re.search(r'\d+', raw)
+    if not m:
+        return None
+    idx = int(m.group()) - 1
+    return events[idx] if 0 <= idx < len(events) else None
+
+
+def parse_modify_args(text: str, event: dict, gemini_fn) -> dict | None:
+    """
+    Utilise Gemini pour parser la modification demandée.
+    Retourne {title, date, time, duration_min} avec null pour les champs non modifiés.
+    """
+    import re
+    title   = event.get("summary", "(Sans titre)")
+    start   = event["start"].get("dateTime") or event["start"].get("date", "")
+    now_str = datetime.now(tz=TZ).strftime("%Y-%m-%d %H:%M (%A %d %B %Y)")
+    prompt = (
+        f"Aujourd'hui : {now_str}, fuseau Europe/Paris.\n"
+        f"Événement actuel : \"{title}\" prévu le {start}\n"
+        f"Modification demandée : \"{text}\"\n"
+        f"Retourne UNIQUEMENT un JSON avec les champs à changer :\n"
+        f'  "title": string ou null,\n'
+        f'  "date": "YYYY-MM-DD" ou null,\n'
+        f'  "time": "HH:MM" ou null,\n'
+        f'  "duration_min": int ou null\n'
+        f"Retourne null si rien à changer."
+    )
+    raw = gemini_fn(prompt)
+    m = re.search(r'\{.*?\}', raw, re.DOTALL)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group())
+    except json.JSONDecodeError:
         return None
 
 

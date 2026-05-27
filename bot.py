@@ -3,6 +3,7 @@ Projet Hermes — Bot Telegram
 Architecture : Claude Code + claude-connaissance vault
 Multi-client, validation humaine, pas d'auto-modification
 """
+from __future__ import annotations
 
 import os
 import asyncio
@@ -11,6 +12,8 @@ import unicodedata
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
+load_dotenv()  # ← avant tout import qui lit les env vars
+
 from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -19,8 +22,6 @@ from google import genai
 from google.genai import types
 import storage
 import calendar_google as gcal
-
-load_dotenv()
 storage.init_db()
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -221,16 +222,20 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "🤖 *Projet Hermes* — en ligne\n\n"
+        "📅 *Calendrier*\n"
+        "`/agenda [n]` — prochains événements\n"
+        "`/tache [texte]` — créer un événement\n"
+        "`/meet [texte]` — créer + lien Meet\n"
+        "`/campagne [planning]` — créer plusieurs events d'un coup\n"
+        "`/annule [description]` — supprimer un événement\n"
+        "`/modif [event] | [modification]` — modifier\n\n"
+        "🗃️ *Vault*\n"
         "`/client [nom]` — changer de contexte\n"
-        "`/clients` — lister les clients\n"
         "`/memo [info]` — ancrer dans le vault\n"
-        "`/gold [texte]` — distiller des idées actionnables\n"
-        "`/agenda [n]` — prochains événements Google Calendar\n"
-        "`/rdv titre | date | heure` — créer un événement\n"
-        "`/meet titre | date | heure` — créer un événement + lien Meet\n"
-        "`/status` — état du système\n"
-        "`/reset` — vider l'historique de session\n\n"
-        "Ou envoie un message directement.",
+        "`/gold [texte]` — distiller des idées\n\n"
+        "🔧 *Système*\n"
+        "`/status` · `/reset` · `/search` · `/monitor`\n\n"
+        "Ou écris directement — 'annule le rdv de lundi', 'planifie une réunion jeudi 10h'…",
         parse_mode="Markdown"
     )
 
@@ -399,11 +404,12 @@ def _gcal_available() -> bool:
     return (gcal.TOKEN_FILE.exists() or gcal.CREDENTIALS_FILE.exists())
 
 def _gemini_fn(prompt: str) -> str:
-    """Wrappeur synchrone Gemini pour le parsing de dates."""
+    """Wrappeur synchrone Gemini pour le parsing de dates/events.
+    max_output_tokens élevé : Gemini 2.5 Flash consomme des tokens sur sa réflexion interne."""
     r = gemini.models.generate_content(
         model=GEMINI_MODEL,
         contents=prompt,
-        config=types.GenerateContentConfig(max_output_tokens=200)
+        config=types.GenerateContentConfig(max_output_tokens=1024)
     )
     return r.text
 
@@ -666,6 +672,17 @@ CALENDAR_TRIGGERS = [
     "mon planning", "mes rendez", "prochains events", "qu'est-ce que j'ai",
 ]
 
+NL_DELETE_WORDS = ["annule", "supprime", "cancel", "efface", "retire du calendrier"]
+NL_MODIFY_WORDS = [
+    "decale", "reporte", "modifie", "change l heure", "repousse", "deplace",
+    "trop tot", "trop tard", "pas le temps", "arrive trop", "ca ne va pas",
+    "probleme avec", "conflit", "indisponible",
+]
+NL_CREATE_WORDS = [
+    "cree un rdv", "ajoute un rdv", "planifie", "mets au calendrier",
+    "ajoute au calendrier", "note un rdv", "prevois", "bloque le creneau",
+]
+
 MEMO_TRIGGERS = [
     "note ça", "note ca", "ajoute", "sauvegarde", "retiens",
     "mets dans inbox", "rappel", "mémorise", "memorise",
@@ -686,6 +703,17 @@ def detect_memo_intent(text: str) -> bool:
 def detect_web_intent(text: str) -> bool:
     t = strip_accents(text.lower())
     return any(trigger in t for trigger in [strip_accents(w) for w in WEB_TRIGGERS])
+
+def detect_calendar_action(text: str) -> str | None:
+    """Retourne 'delete', 'modify', 'create', ou None."""
+    t = strip_accents(text.lower())
+    if any(w in t for w in [strip_accents(x) for x in NL_DELETE_WORDS]):
+        return "delete"
+    if any(w in t for w in [strip_accents(x) for x in NL_MODIFY_WORDS]):
+        return "modify"
+    if any(w in t for w in [strip_accents(x) for x in NL_CREATE_WORDS]):
+        return "create"
+    return None
 
 def strip_accents(s: str) -> str:
     return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
@@ -745,11 +773,361 @@ def detect_client(text: str) -> str | None:
             return client
     return None
 
+def _derive_campaign_name(events: list[dict]) -> str:
+    """Dérive un nom court de campagne depuis la liste d'événements parsés."""
+    from datetime import datetime as _dt
+    if not events:
+        return "Campagne"
+    titles = [ev.get("title", "") for ev in events]
+    first_words = [t.split()[0] if t.split() else "" for t in titles]
+    common = first_words[0] if first_words and all(w == first_words[0] for w in first_words) else ""
+    try:
+        dt = _dt.strptime(events[0]["date"], "%Y-%m-%d")
+        month_year = dt.strftime("%B %Y")
+    except Exception:
+        month_year = ""
+    if common:
+        return f"Campagne {common} {month_year}".strip()
+    return f"Planning {month_year}".strip() or "Campagne"
+
+
+def _build_campagne_table(events: list[dict], campaign_name: str) -> str:
+    """Formate le tableau de validation d'une campagne pour Telegram HTML."""
+    from datetime import datetime as _dt
+    n = len(events)
+    lines = [f"📅 <b>{n} événement(s) détecté(s) :</b>"]
+    for i, ev in enumerate(events, 1):
+        title    = ev.get("title", "Sans titre")
+        date_str = ev.get("date", "")
+        time_str = ev.get("time", "09:00")
+        dur      = ev.get("duration_min", 60)
+        try:
+            dt_s = _dt.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+            dt_e = dt_s + timedelta(minutes=dur)
+            day_label  = dt_s.strftime("%a %d/%m/%Y")
+            time_label = f"{dt_s.strftime('%H:%M')}–{dt_e.strftime('%H:%M')}"
+        except Exception:
+            day_label  = date_str
+            time_label = time_str
+        desc = f"Tâche N°{i}/{n} — {campaign_name}"
+        lines.append(
+            f"\n<b>{i}.</b> {title}\n"
+            f"   📆 {day_label}  🕐 {time_label}\n"
+            f"   📝 <i>{desc}</i>"
+        )
+    lines.append(
+        "\n<i>C'est conforme ? Réponds <b>oui</b> pour créer, <b>non</b> pour annuler,\n"
+        "ou dis-moi ce que tu veux changer (ex: \"décale le 2 à 14h\").</i>"
+    )
+    return "\n".join(lines)
+
+
+def _fmt_gcal_start(start: str) -> str:
+    """Formate une datetime ISO Calendar en chaîne lisible."""
+    try:
+        if "T" in start:
+            dt = datetime.fromisoformat(start).astimezone(gcal.TZ)
+            return dt.strftime("%a %d/%m à %H:%M")
+        return start
+    except Exception:
+        return start
+
+def _apply_event_update(event: dict, parsed: dict) -> dict | None:
+    """Applique les modifications parsées et retourne l'événement mis à jour, ou None."""
+    title    = parsed.get("title") or None
+    start_dt = None
+    if parsed.get("date") or parsed.get("time"):
+        orig_start = event["start"].get("dateTime") or event["start"].get("date", "")
+        try:
+            orig_dt = datetime.fromisoformat(orig_start).astimezone(gcal.TZ)
+            d = parsed.get("date") or orig_dt.strftime("%Y-%m-%d")
+            t = parsed.get("time") or orig_dt.strftime("%H:%M")
+            start_dt = datetime.strptime(f"{d} {t}", "%Y-%m-%d %H:%M").replace(tzinfo=gcal.TZ)
+        except Exception:
+            pass
+    try:
+        return gcal.update_event(
+            event["id"],
+            title        = title,
+            start_dt     = start_dt,
+            duration_min = parsed.get("duration_min"),
+        )
+    except Exception:
+        return None
+
+async def _handle_calendar_nl(update: Update, action: str, text: str, uid: int) -> bool:
+    """Gère une action calendrier détectée en NL. Retourne True si gérée."""
+    await update.message.chat.send_action("typing")
+
+    if action == "delete":
+        event = gcal.find_event_by_description(text, _gemini_fn)
+        if not event:
+            await update.message.reply_text("❌ Aucun événement trouvé pour cette description.")
+            return True
+        title = event.get("summary", "(Sans titre)")
+        ts    = _fmt_gcal_start(event["start"].get("dateTime") or event["start"].get("date", ""))
+        try:
+            gcal.delete_event(event["id"])
+            await update.message.reply_text(
+                f"🗑️ <b>{title}</b> supprimé\n🕐 {ts}", parse_mode="HTML"
+            )
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ Erreur suppression : {e}")
+        return True
+
+    if action == "modify":
+        event = gcal.find_event_by_description(text, _gemini_fn)
+        if not event:
+            return False  # Passer au flow normal si on ne trouve pas l'event
+        parsed = gcal.parse_modify_args(text, event, _gemini_fn)
+        if parsed:
+            # Modification claire → on applique directement
+            updated = _apply_event_update(event, parsed)
+            if updated:
+                ts = _fmt_gcal_start(updated["start"].get("dateTime", ""))
+                await update.message.reply_text(
+                    f"✏️ <b>{updated.get('summary', '(Sans titre)')}</b> mis à jour\n🕐 {ts}",
+                    parse_mode="HTML",
+                )
+            else:
+                await update.message.reply_text("⚠️ Modification impossible.")
+        else:
+            # Modification vague → poser la question, stocker l'état
+            title = event.get("summary", "(Sans titre)")
+            ts    = _fmt_gcal_start(event["start"].get("dateTime") or event["start"].get("date", ""))
+            if uid not in _session_cache:
+                _session_cache[uid] = {}
+            _session_cache[uid]["pending_modif"] = {
+                "event_id":    event["id"],
+                "event_title": title,
+            }
+            await update.message.reply_text(
+                f"📅 <b>{title}</b> — {ts}\n\n"
+                f"Qu'est-ce qui pose problème ? Le jour, l'heure, la durée, ou autre chose ?",
+                parse_mode="HTML",
+            )
+        return True
+
+    if action == "create":
+        parsed = gcal.parse_event_args(text, _gemini_fn)
+        if not parsed:
+            return False
+        dt = gcal.build_event_datetime(parsed)
+        if not dt:
+            return False
+        try:
+            event = gcal.create_event(
+                title        = parsed.get("title", text),
+                start_dt     = dt,
+                duration_min = parsed.get("duration_min", 60),
+                with_meet    = parsed.get("with_meet", False),
+            )
+            await update.message.reply_text(gcal.format_created_event(event), parse_mode="HTML")
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ Erreur création : {e}")
+        return True
+
+    return False
+
+async def cmd_tache(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Alias de /rdv — crée un événement en NL."""
+    return await cmd_rdv(update, ctx)
+
+async def cmd_annule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Annule un événement. Usage : /annule réunion de lundi"""
+    if not authorized(update.effective_user.id):
+        return
+    if not _gcal_available():
+        await update.message.reply_text("⚠️ Google Calendar non configuré.")
+        return
+    if not ctx.args:
+        await update.message.reply_text(
+            "Usage : <code>/annule [description de l'événement]</code>\n"
+            "Ex : <code>/annule réunion lundi matin</code>",
+            parse_mode="HTML",
+        )
+        return
+    raw = " ".join(ctx.args)
+    await update.message.chat.send_action("typing")
+    event = gcal.find_event_by_description(raw, _gemini_fn)
+    if not event:
+        await update.message.reply_text("❌ Aucun événement trouvé pour cette description.")
+        return
+    title = event.get("summary", "(Sans titre)")
+    ts    = _fmt_gcal_start(event["start"].get("dateTime") or event["start"].get("date", ""))
+    try:
+        gcal.delete_event(event["id"])
+        await update.message.reply_text(
+            f"🗑️ <b>{title}</b> supprimé\n🕐 {ts}", parse_mode="HTML"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Erreur suppression : {e}")
+
+async def cmd_modif(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Modifie un événement. Usage : /modif réunion lundi | décale à 15h"""
+    if not authorized(update.effective_user.id):
+        return
+    if not _gcal_available():
+        await update.message.reply_text("⚠️ Google Calendar non configuré.")
+        return
+    if not ctx.args:
+        await update.message.reply_text(
+            "Usage : <code>/modif [événement] | [modification]</code>\n"
+            "Ex : <code>/modif réunion lundi | décale à 15h</code>\n"
+            "Ex : <code>/modif appel client | renomme en Call Idéallis</code>",
+            parse_mode="HTML",
+        )
+        return
+    raw = " ".join(ctx.args)
+    await update.message.chat.send_action("typing")
+    # Séparer description de l'event et modification si | présent
+    if "|" in raw:
+        event_desc, change_desc = [x.strip() for x in raw.split("|", 1)]
+    else:
+        event_desc = change_desc = raw
+    event = gcal.find_event_by_description(event_desc, _gemini_fn)
+    if not event:
+        await update.message.reply_text("❌ Aucun événement trouvé pour cette description.")
+        return
+    parsed = gcal.parse_modify_args(change_desc, event, _gemini_fn)
+    if not parsed:
+        await update.message.reply_text("❌ Impossible de parser la modification.")
+        return
+    updated = _apply_event_update(event, parsed)
+    if updated:
+        ts = _fmt_gcal_start(updated["start"].get("dateTime", ""))
+        await update.message.reply_text(
+            f"✏️ <b>{updated.get('summary', '(Sans titre)')}</b> mis à jour\n🕐 {ts}",
+            parse_mode="HTML",
+        )
+    else:
+        await update.message.reply_text("⚠️ Modification impossible.")
+
+async def cmd_campagne(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Parse un planning et demande validation avant de créer les events.
+    Usage : /campagne Interview Éric 9 juin 10h, Hervé 16 juin 10h…"""
+    if not authorized(update.effective_user.id):
+        return
+    if not _gcal_available():
+        await update.message.reply_text("⚠️ Google Calendar non configuré.")
+        return
+    if not ctx.args:
+        await update.message.reply_text(
+            "Usage : <code>/campagne [planning]</code>\n"
+            "Ex : <code>/campagne Interview Éric 9 juin 10h, Hervé 16 juin 10h, Karine 23 juin 10h</code>",
+            parse_mode="HTML",
+        )
+        return
+    uid = update.effective_user.id
+    raw = " ".join(ctx.args)
+    await update.message.chat.send_action("typing")
+    events = gcal.parse_event_list(raw, _gemini_fn)
+    if not events:
+        await update.message.reply_text("❌ Aucun événement détecté dans ce texte.")
+        return
+    campaign_name = _derive_campaign_name(events)
+    _session_cache.setdefault(uid, {})["pending_campagne"] = {
+        "events": events,
+        "campaign_name": campaign_name,
+    }
+    reply = _build_campagne_table(events, campaign_name)
+    for chunk in split_message(reply):
+        await update.message.reply_text(chunk, parse_mode="HTML")
+
+
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not authorized(update.effective_user.id):
         return
-    s = session(update.effective_user.id)
+    uid = update.effective_user.id
+    s = session(uid)
     user_text = update.message.text
+
+    # Résolution pending_campagne (validation campagne en attente)
+    pending_campagne = _session_cache.get(uid, {}).get("pending_campagne")
+    if pending_campagne and _gcal_available():
+        t_lower = user_text.lower().strip()
+        CONFIRM = {"oui", "ok", "go", "c'est bon", "vas-y", "crée", "cree", "yes", "ouais"}
+        CANCEL  = {"non", "annule", "cancel", "stop", "laisse tomber"}
+        is_confirm = any(t_lower == kw or t_lower.startswith(kw + " ") for kw in CONFIRM)
+        is_cancel  = any(t_lower == kw or t_lower.startswith(kw + " ") for kw in CANCEL)
+
+        if is_confirm:
+            events        = pending_campagne["events"]
+            campaign_name = pending_campagne["campaign_name"]
+            _session_cache[uid]["pending_campagne"] = None
+            await update.message.chat.send_action("typing")
+            created, errors = [], []
+            n = len(events)
+            for i, ev in enumerate(events, 1):
+                dt = gcal.build_event_datetime(ev)
+                if not dt:
+                    errors.append(ev.get("title", "?"))
+                    continue
+                description = f"Tâche N°{i}/{n} — {campaign_name}"
+                try:
+                    c = gcal.create_event(
+                        title        = ev.get("title", "Sans titre"),
+                        start_dt     = dt,
+                        duration_min = ev.get("duration_min", 60),
+                        description  = description,
+                        with_meet    = ev.get("with_meet", False),
+                    )
+                    ts = _fmt_gcal_start(c["start"].get("dateTime", ""))
+                    created.append(f"✅ <b>{c.get('summary', '?')}</b> — {ts}")
+                except Exception as e:
+                    errors.append(f"{ev.get('title', '?')} ({e})")
+            reply = f"📅 <b>Campagne créée — {len(created)} événement(s)</b>\n\n" + "\n".join(created)
+            if errors:
+                reply += "\n\n⚠️ Échecs : " + ", ".join(errors)
+            for chunk in split_message(reply):
+                await update.message.reply_text(chunk, parse_mode="HTML")
+            return
+
+        elif is_cancel:
+            _session_cache[uid]["pending_campagne"] = None
+            await update.message.reply_text("❌ Campagne annulée.")
+            return
+
+        else:
+            # Modifier la liste via Gemini puis réafficher
+            await update.message.chat.send_action("typing")
+            updated = gcal.parse_campagne_modif(
+                pending_campagne["events"], user_text, _gemini_fn
+            )
+            _session_cache[uid]["pending_campagne"]["events"] = updated
+            reply = _build_campagne_table(updated, pending_campagne["campaign_name"])
+            for chunk in split_message(reply):
+                await update.message.reply_text(chunk, parse_mode="HTML")
+            return
+
+    # Résolution pending_modif (modification conversationnelle en attente)
+    pending_modif = _session_cache.get(uid, {}).get("pending_modif")
+    if pending_modif and _gcal_available():
+        await update.message.chat.send_action("typing")
+        try:
+            event = gcal.get_event_by_id(pending_modif["event_id"])
+        except Exception:
+            event = {
+                "id": pending_modif["event_id"],
+                "summary": pending_modif["event_title"],
+                "start": {"dateTime": ""},
+                "end":   {"dateTime": ""},
+            }
+        _session_cache[uid]["pending_modif"] = None  # toujours effacer
+        parsed = gcal.parse_modify_args(user_text, event, _gemini_fn)
+        if parsed:
+            updated = _apply_event_update(event, parsed)
+            if updated:
+                ts = _fmt_gcal_start(updated["start"].get("dateTime", ""))
+                await update.message.reply_text(
+                    f"✏️ <b>{updated.get('summary', '(Sans titre)')}</b> mis à jour\n🕐 {ts}",
+                    parse_mode="HTML",
+                )
+                return
+        await update.message.reply_text(
+            "❌ Pas compris la modification. Reformule ou utilise /modif."
+        )
+        return
 
     # Détection automatique du client dans le message
     detected = detect_client(user_text)
@@ -793,6 +1171,14 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         return
+
+    # Détection action calendrier en NL (annule / modifie / crée)
+    if _gcal_available():
+        cal_action = detect_calendar_action(user_text)
+        if cal_action:
+            handled = await _handle_calendar_nl(update, cal_action, user_text, uid)
+            if handled:
+                return
 
     t_lower = strip_accents(user_text.lower())
 
@@ -960,7 +1346,14 @@ def main():
     if not GEMINI_KEY:
         raise ValueError("GEMINI_API_KEY manquant dans .env")
 
+    async def error_handler(update, context):
+        from telegram.error import TimedOut, NetworkError
+        if isinstance(context.error, (TimedOut, NetworkError)):
+            return  # retry automatique, pas de crash
+        print(f"⚠️ Erreur Telegram : {context.error}")
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start",   cmd_start))
     app.add_handler(CommandHandler("clients", cmd_clients))
     app.add_handler(CommandHandler("client",  cmd_client))
@@ -971,7 +1364,11 @@ def main():
     app.add_handler(CommandHandler("myid",    cmd_myid))
     app.add_handler(CommandHandler("agenda",  cmd_agenda))
     app.add_handler(CommandHandler("rdv",     cmd_rdv))
+    app.add_handler(CommandHandler("tache",   cmd_tache))
     app.add_handler(CommandHandler("meet",    cmd_meet))
+    app.add_handler(CommandHandler("campagne", cmd_campagne))
+    app.add_handler(CommandHandler("annule",  cmd_annule))
+    app.add_handler(CommandHandler("modif",   cmd_modif))
     app.add_handler(CommandHandler("save",    cmd_save))
     app.add_handler(CommandHandler("search",  cmd_search))
     app.add_handler(CommandHandler("monitor", cmd_monitor))
