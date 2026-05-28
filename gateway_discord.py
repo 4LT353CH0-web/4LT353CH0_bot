@@ -16,7 +16,7 @@ DISCORD_ALLOWED_CHANNELS = {
     int(x) for x in os.getenv("DISCORD_ALLOWED_CHANNEL_IDS", "").split(",") if x.strip()
 }
 
-def run_discord_gateway(handle_fn):
+def run_discord_gateway(handle_fn, auto_saver=None):
     """
     Lance le bot Discord. handle_fn(text, user_id, reply_fn) est appelé pour chaque message.
     Appeler depuis un thread séparé si on veut paralléliser avec Telegram.
@@ -44,14 +44,19 @@ def run_discord_gateway(handle_fn):
     @client.event
     async def on_ready():
         print(f"🎮 Discord gateway connectée : {client.user}", flush=True)
+        if auto_saver:
+            asyncio.create_task(auto_saver())
 
     @client.event
     async def on_message(message):
         # Ignorer les messages du bot lui-même
         if message.author == client.user:
             return
+        # Log channel ID pour debug
+        print(f"📍 Message reçu — channel: {message.channel.id} ({message.channel.name})", flush=True)
         # Filtrer les canaux autorisés
         if DISCORD_ALLOWED_CHANNELS and message.channel.id not in DISCORD_ALLOWED_CHANNELS:
+            print(f"   ↳ Ignoré (pas dans allowed: {DISCORD_ALLOWED_CHANNELS})", flush=True)
             return
 
         async def reply_fn(text: str):

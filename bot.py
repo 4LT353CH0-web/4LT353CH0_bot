@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import asyncio
+import time
 import subprocess
 import unicodedata
 from pathlib import Path
@@ -66,6 +67,7 @@ GEMINI_MODEL = "gemini-2.5-flash"
 
 # ── Sessions SQLite persistantes ──────────────────────────────────────────────
 _session_cache: dict = {}  # cache in-memory pour pending_skill uniquement
+_last_discord_activity: dict[int, float] = {}
 
 def session(uid: int) -> dict:
     """Charge depuis SQLite. Cache pending_skill en RAM (éphémère ok)."""
@@ -1363,6 +1365,7 @@ def main():
 
     async def discord_handler(text: str, user_id: int, reply_fn):
         """Même logique que handle_message mais pour Discord."""
+        _last_discord_activity[user_id] = time.time()
         s = session(user_id)
         detected = detect_client(text)
         if detected and detected != s["client"]:
@@ -1402,9 +1405,25 @@ def main():
         vault_name = next((k for k, v in VAULTS.items() if v == active_vault), "connaissance")
         await reply_fn(reply + f"\n\n📂 {vault_name} · {s['client']}")
 
+    INACTIVITY_TIMEOUT = 600  # 10 min sans activite -> auto-save
+
+    async def discord_auto_saver():
+        while True:
+            await asyncio.sleep(60)
+            now = time.time()
+            to_save = [uid for uid, ts in list(_last_discord_activity.items())
+                       if now - ts >= INACTIVITY_TIMEOUT]
+            for uid in to_save:
+                s = session(uid)
+                if len(s["history"]) >= 2:
+                    extract_and_save_conversation(s["client"], s["history"])
+                    storage.reset_history(uid)
+                    s["history"] = []
+                del _last_discord_activity[uid]
+
     threading.Thread(
         target=gateway_discord.run_discord_gateway,
-        args=(discord_handler,),
+        args=(discord_handler, discord_auto_saver),
         daemon=True
     ).start()
 
