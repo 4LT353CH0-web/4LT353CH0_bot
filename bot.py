@@ -565,7 +565,7 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     types.Part(text="Transcris ce message vocal et réponds.")
                 ])
             ],
-            config=types.GenerateContentConfig(max_output_tokens=1500)
+                    config=types.GenerateContentConfig(max_output_tokens=4096)
         )
         reply = r.text
     except Exception as e:
@@ -633,7 +633,9 @@ def extract_and_save_conversation(client_name: str, history: list) -> bool:
 
     ts = datetime.now().strftime("%Y-%m-%d-%H-%M")
     filename = f"conversation-{ts}-{client_name}.md"
-    target = VAULT / "_inbox" / filename
+    inbox_dir = VAULT / "_inbox" / "4LT353CH0-bot"
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+    target = inbox_dir / filename
     content = (
         f"# Conversation Hermes — {client_name} — {ts}\n\n"
         f"{analysis}\n\n"
@@ -653,7 +655,9 @@ def save_to_inbox(client_name: str, content: str) -> bool:
     """Sauvegarde une réponse du bot dans _inbox/ pour traitement Claude Code."""
     ts = datetime.now().strftime("%Y-%m-%d-%H-%M")
     filename = f"bot-{ts}-{client_name}.md"
-    target = VAULT / "_inbox" / filename
+    inbox_dir = VAULT / "_inbox" / "4LT353CH0-bot"
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+    target = inbox_dir / filename
     header = f"# Bot Hermes — {client_name} — {ts}\n\n"
     target.write_text(header + content)
     try:
@@ -1292,7 +1296,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Browser : activer Google Search si intent web détecté
     use_web = detect_web_intent(user_text)
     gen_config = types.GenerateContentConfig(
-        max_output_tokens=1500,
+        max_output_tokens=4096,
         tools=[types.Tool(google_search=types.GoogleSearch())] if use_web else []
     )
 
@@ -1352,28 +1356,7 @@ def main():
             return  # retry automatique, pas de crash
         print(f"⚠️ Erreur Telegram : {context.error}")
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_error_handler(error_handler)
-    app.add_handler(CommandHandler("start",   cmd_start))
-    app.add_handler(CommandHandler("clients", cmd_clients))
-    app.add_handler(CommandHandler("client",  cmd_client))
-    app.add_handler(CommandHandler("memo",    cmd_memo))
-    app.add_handler(CommandHandler("gold",    cmd_gold))
-    app.add_handler(CommandHandler("status",  cmd_status))
-    app.add_handler(CommandHandler("reset",   cmd_reset))
-    app.add_handler(CommandHandler("myid",    cmd_myid))
-    app.add_handler(CommandHandler("agenda",  cmd_agenda))
-    app.add_handler(CommandHandler("rdv",     cmd_rdv))
-    app.add_handler(CommandHandler("tache",   cmd_tache))
-    app.add_handler(CommandHandler("meet",    cmd_meet))
-    app.add_handler(CommandHandler("campagne", cmd_campagne))
-    app.add_handler(CommandHandler("annule",  cmd_annule))
-    app.add_handler(CommandHandler("modif",   cmd_modif))
-    app.add_handler(CommandHandler("save",    cmd_save))
-    app.add_handler(CommandHandler("search",  cmd_search))
-    app.add_handler(CommandHandler("monitor", cmd_monitor))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
+    # Telegram désactivé — Discord uniquement
 
     # Gateway Discord (bidirectionnel) en thread parallèle
     import threading, gateway_discord
@@ -1412,7 +1395,7 @@ def main():
             contents.append(types.Content(role=h["role"], parts=[types.Part(text=h["parts"][0])]))
         r = gemini.models.generate_content(
             model=GEMINI_MODEL, contents=contents,
-            config=types.GenerateContentConfig(max_output_tokens=1500)
+                    config=types.GenerateContentConfig(max_output_tokens=4096)
         )
         reply = r.text
         storage.add_message(user_id, "model", reply)
@@ -1425,8 +1408,9 @@ def main():
         daemon=True
     ).start()
 
-    print(f"🚀 Projet Hermes démarré — vault : {VAULT}")
-    app.run_polling()
+    print(f"🚀 Hermes Discord démarré — vault : {VAULT}")
+    import threading
+    threading.Event().wait()
 
 if __name__ == "__main__":
     main()
