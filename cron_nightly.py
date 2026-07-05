@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 Hermes — Digest nightly
-Collecte les signaux du jour → Gemini → Telegram
+Collecte les signaux du jour → Gemini → Discord
 """
 
 import os
-import asyncio
 import subprocess
 import urllib.request
 import json
@@ -14,17 +13,13 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-import telegram
 
 load_dotenv()
 
 VAULT            = Path(os.getenv("VAULT_PATH", os.path.expanduser("~/claude-connaissance")))
 GEMINI_KEY       = os.getenv("GEMINI_API_KEY")
-TOKEN            = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID          = os.getenv("TELEGRAM_CHAT_ID", "")
 DISCORD_WEBHOOK  = os.getenv("DISCORD_WEBHOOK",
-    "https://discord.com/api/webhooks/1497502798986870825/"
-    "OJFKCTkHD8-JGuaPrA7dDaeJVWAAF_7LikenyB3qL1HtU1MQlDdByTpKXs9yTxvGBUPG"
+    "https://discord.com/api/webhooks/1509266080944750724/7ZHETQoJ2t3Uwhr5fYpHh_goGwrImJu7DtlER2U0M0QHtdd2GaCp3ngeaUK8zMWSasEK"
 )
 
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -70,12 +65,9 @@ def collect_inbox(hours: int = 24) -> list[str]:
 
 # ── Digest ────────────────────────────────────────────────────────────────────
 
-async def send_digest():
-    if not CHAT_ID:
-        print("TELEGRAM_CHAT_ID non défini dans .env — digest ignoré")
-        return
-    if not TOKEN or not GEMINI_KEY:
-        print("Token ou clé Gemini manquant — abort")
+def send_digest():
+    if not GEMINI_KEY:
+        print("Clé Gemini manquante — abort")
         return
 
     memos  = collect_memos()
@@ -109,18 +101,13 @@ async def send_digest():
     r = gemini_client.models.generate_content(
         model=GEMINI_MODEL,
         contents=prompt,
-        config=types.GenerateContentConfig(max_output_tokens=500)
+        config=types.GenerateContentConfig(max_output_tokens=1500)
     )
 
     date_str = datetime.now().strftime("%d %b")
     message  = f"🌙 Digest Hermes — {date_str}\n\n{r.text}"
 
-    # 1. Envoyer sur Telegram
-    bot = telegram.Bot(token=TOKEN)
-    await bot.send_message(chat_id=int(CHAT_ID), text=message)
-    print(f"[{datetime.now():%Y-%m-%d %H:%M}] ✓ Telegram → {CHAT_ID}")
-
-    # 2. Envoyer sur Discord #n8n-news
+    # Envoyer sur Discord
     try:
         url = DISCORD_WEBHOOK.strip()
         payload = json.dumps({"content": message}).encode("utf-8")
@@ -143,10 +130,11 @@ async def send_digest():
         subprocess.run(["git", "add", str(target)], cwd=VAULT, check=True, capture_output=True)
         subprocess.run(["git", "commit", "-m", f"digest nightly : {ts}"],
                        cwd=VAULT, check=True, capture_output=True)
+        subprocess.run(["git", "pull", "--rebase"], cwd=VAULT, check=True, capture_output=True)
         subprocess.run(["git", "push"], cwd=VAULT, check=True, capture_output=True)
         print(f"[{datetime.now():%Y-%m-%d %H:%M}] ✓ Digest → _inbox/{filename} + pushé GitHub")
     except subprocess.CalledProcessError as e:
         print(f"[{datetime.now():%Y-%m-%d %H:%M}] ⚠ Digest sauvegardé localement mais push échoué : {e}")
 
 if __name__ == "__main__":
-    asyncio.run(send_digest())
+    send_digest()

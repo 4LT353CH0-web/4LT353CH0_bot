@@ -212,6 +212,7 @@ def append_memory(client_name: str, info: str) -> bool:
     try:
         subprocess.run(["git", "add", str(target)], cwd=VAULT, check=True, capture_output=True)
         subprocess.run(["git", "commit", "-m", msg], cwd=VAULT, check=True, capture_output=True)
+        subprocess.run(["git", "pull", "--rebase"], cwd=VAULT, check=True, capture_output=True)
         subprocess.run(["git", "push"], cwd=VAULT, check=True, capture_output=True)
         return True
     except subprocess.CalledProcessError:
@@ -648,6 +649,7 @@ def extract_and_save_conversation(client_name: str, history: list) -> bool:
         subprocess.run(["git", "add", str(target)], cwd=VAULT, check=True, capture_output=True)
         subprocess.run(["git", "commit", "-m", f"conversation hermes : {client_name} {ts}"],
                        cwd=VAULT, check=True, capture_output=True)
+        subprocess.run(["git", "pull", "--rebase"], cwd=VAULT, check=True, capture_output=True)
         subprocess.run(["git", "push"], cwd=VAULT, check=True, capture_output=True)
         return True
     except subprocess.CalledProcessError:
@@ -666,6 +668,7 @@ def save_to_inbox(client_name: str, content: str) -> bool:
         subprocess.run(["git", "add", str(target)], cwd=VAULT, check=True, capture_output=True)
         subprocess.run(["git", "commit", "-m", f"bot → inbox : {client_name} {ts}"],
                        cwd=VAULT, check=True, capture_output=True)
+        subprocess.run(["git", "pull", "--rebase"], cwd=VAULT, check=True, capture_output=True)
         subprocess.run(["git", "push"], cwd=VAULT, check=True, capture_output=True)
         return True
     except subprocess.CalledProcessError:
@@ -1213,6 +1216,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             subprocess.run(["git", "add", str(target)], cwd=VAULT, check=True, capture_output=True)
             subprocess.run(["git", "commit", "-m", f"skill suggestion : {skill_name}"], cwd=VAULT, check=True, capture_output=True)
+            subprocess.run(["git", "pull", "--rebase"], cwd=VAULT, check=True, capture_output=True)
             subprocess.run(["git", "push"], cwd=VAULT, check=True, capture_output=True)
         except Exception:
             pass
