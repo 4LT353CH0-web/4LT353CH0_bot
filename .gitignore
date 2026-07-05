@@ -1,2 +1,9 @@
 .env
 hermes.db
+credentials-gcal.json
+token-gcal.json
+hermes.db-shm
+hermes.db-wal
+logs/
+__pycache__/
+*.bak
