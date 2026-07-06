@@ -18,9 +18,7 @@ load_dotenv()
 
 VAULT            = Path(os.getenv("VAULT_PATH", os.path.expanduser("~/claude-connaissance")))
 GEMINI_KEY       = os.getenv("GEMINI_API_KEY")
-DISCORD_WEBHOOK  = os.getenv("DISCORD_WEBHOOK",
-    "https://discord.com/api/webhooks/1509266080944750724/7ZHETQoJ2t3Uwhr5fYpHh_goGwrImJu7DtlER2U0M0QHtdd2GaCp3ngeaUK8zMWSasEK"
-)
+DISCORD_WEBHOOK  = os.getenv("DISCORD_WEBHOOK", "")
 
 GEMINI_MODEL = "gemini-2.5-flash"
 
