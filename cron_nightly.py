@@ -53,6 +53,8 @@ def collect_inbox(hours: int = 24) -> list[str]:
     if not inbox.exists():
         return found
     for f in sorted(inbox.glob("*.md")):
+        if f.name.startswith("digest-nightly-"):
+            continue
         try:
             if datetime.fromtimestamp(f.stat().st_mtime) >= cutoff:
                 excerpt = f.read_text()[:600]

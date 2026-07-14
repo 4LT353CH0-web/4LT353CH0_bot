@@ -52,6 +52,9 @@ def run_discord_gateway(handle_fn, auto_saver=None):
         # Ignorer les messages du bot lui-même
         if message.author == client.user:
             return
+        # Ignorer les webhooks (digest nightly...) et les autres bots
+        if message.webhook_id is not None or message.author.bot:
+            return
         # Log channel ID pour debug
         print(f"📍 Message reçu — channel: {message.channel.id} ({message.channel.name})", flush=True)
         # Filtrer les canaux autorisés
